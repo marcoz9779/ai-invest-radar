@@ -45,24 +45,41 @@ streamlit run app.py
 - **Mention-Velocity-Indikator** (24h-Rate vs 7d-Durchschnitt) zeigt Hype-Spikes
 - Läuft **anonym ohne Account** via public JSON-Endpoint
 
-**Dashboard (Phase 2.7):**
-- Top-5-Empfehlungen-Karten ganz oben mit Logos und farbigen BUY/WATCH/HOLD/REDUCE/SELL-Badges
-- Pro Ticker: Logo, Sparkline, klares Label, Reddit-Spike-Indikator
-- Lazy-Loading: voller Candlestick, News-Aggregation und Reddit-Posts erst beim Aufklappen
-- Caching (5 Min TTL) reduziert API-Last
-- Filter: Empfehlungs-Typ, Min-Score, Reddit on/off
+**Dashboard (Phase 2.7 – "Non plus ultra"-Build):**
+- **Market-Context-Bar** im Header: Fear & Greed Krypto + stärkster/schwächster Sektor (5d)
+- **Treemap-Heatmap** aller 80 Assets — Fläche = Score-Stärke, Farbe = Empfehlung
+- **Top-5-Empfehlungen-Karten** mit Logo, Earnings-Badge und Reddit-Spike-Indikator
+- Pro Ticker: Logo, Sparkline, BUY/WATCH/HOLD/REDUCE/SELL-Badge
+- **Earnings-Badge** "📅 Earnings in 3d" wenn innerhalb der nächsten 14 Tage
+- **Reddit-Spike-Badge** "🔥 Spike 3.2x" bei Velocity ≥ 2
+- **TradingView-Widget** im Expander (interaktiver Pro-Chart mit RSI & MACD)
+- News (4 Quellen + dedup) und Reddit-Buzz unter jedem Ticker
+- **Claude AI-Sentiment-Fusion** im Expander (wenn ANTHROPIC_API_KEY gesetzt)
+- Sidebar: Empfehlungs-Filter, Min-Score-Slider, vollständige Sektoren-Performance
+
+**Score-Modell (erweitert):**
+- RSI (oversold/overbought)
+- MACD-Cross (bullish/bearish)
+- SMA20/50-Konfluenz (Auf-/Abwärtstrend)
+- **Volume-Spike** (heute vs 20d-Ø, >2x = +1)
+- **52w-Position** (nahe Tief = oversold-Bonus, nahe Hoch = Risiko)
+- **Reddit-Velocity-Boost** (24h-Spike kann WATCH→BUY anheben)
+- **Earnings-Bonus** (anstehende Earnings boosten WATCH→BUY bei Score ≥ +1)
+- **AI-Sentiment-Override** (Claude kann Label um 1 Stufe verschieben)
 
 ## Roadmap
 
 | Phase | Inhalt | Status |
 |-------|--------|--------|
 | 1 | Daten + technische Indikatoren + Score (40 Aktien) | ✅ |
-| 1.5 | Krypto-Universe Top 40 dynamisch (CoinGecko) | ✅ |
-| 2 | News-Aggregation (Marketaux + Yahoo + Google + Finnhub) | ✅ |
+| 1.5 | Krypto-Universe Top 40 dynamisch (CoinGecko, OHLC + RSI/MACD) | ✅ |
+| 2 | News-Aggregation (Marketaux + Yahoo + Google + Finnhub, dedup) | ✅ |
 | 2.5 | Reddit-Buzz (10+8 Subreddits, parallel, mit Velocity) | ✅ |
-| 2.7 | Streamlit-Dashboard (Logos, Sparklines, BUY/WATCH/SELL-Karten) | ✅ |
-| 3 | Sentiment-Fusion mit Claude (News + Reddit → kombinierter Score) | nächste |
-| 4 | Earnings-Tracking + Surprise-Signale | offen |
+| 2.7 | Streamlit-Dashboard (Treemap, Logos, Sparklines, TradingView) | ✅ |
+| 2.8 | Market-Context (Fear&Greed + Sektoren-ETFs) | ✅ |
+| 2.9 | Earnings-Tracker + Score-Upgrade (Volume, 52w) | ✅ |
+| 3 | Claude AI-Sentiment-Fusion (Hook im Code) | ✅ Code drin, Key optional |
+| 4 | Erweiterte Earnings: Surprise-Tracking + Konsens-Daten | offen |
 | 5 | Telegram-Bot für tägliche Alerts | offen |
 | 6 | SQLite-Storage + Backtesting + History-Charts | offen |
 | 7 | Swissquote-Whitelist als Filter | offen |
