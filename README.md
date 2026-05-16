@@ -112,10 +112,6 @@ streamlit run app.py
 | 5 | Telegram-Bot für tägliche Alerts | offen |
 | 6 | SQLite-Storage + History-Charts | offen |
 | 7 | Swissquote-Whitelist als Filter | offen |
-| 4 | Earnings-Tracking + Surprise-Signale | offen |
-| 5 | Telegram-Bot für tägliche Alerts | offen |
-| 6 | SQLite-Storage + Backtesting | offen |
-| 7 | Swissquote-Whitelist als Filter | offen |
 
 ## Universum
 
