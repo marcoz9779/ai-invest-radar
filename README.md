@@ -61,27 +61,56 @@ streamlit run app.py
 - RSI (oversold/overbought)
 - MACD-Cross (bullish/bearish)
 - SMA20/50-Konfluenz (Auf-/Abwärtstrend)
-- **Volume-Spike** (heute vs 20d-Ø, >2x = +1)
+- **Volume-Spike** (heute vs 20d-Ø, >2x = +1) — jetzt auch für Krypto via Binance
 - **52w-Position** (nahe Tief = oversold-Bonus, nahe Hoch = Risiko)
+- **Insider-Käufe/Verkäufe** in den letzten 30 Tagen (Finnhub free, ≥2 Käufe = +1)
 - **Reddit-Velocity-Boost** (24h-Spike kann WATCH→BUY anheben)
 - **Earnings-Bonus** (anstehende Earnings boosten WATCH→BUY bei Score ≥ +1)
 - **AI-Sentiment-Override** (Claude kann Label um 1 Stufe verschieben)
+
+**Watchlist (Phase 2.9):**
+- "☆ Watch"-Button auf jeder Ticker-Karte
+- Persistiert lokal in `watchlist.json` (gitignored)
+- Separater Tab zeigt nur die gestarteten Assets
+
+**Backtest (Phase 3.5):**
+- 90-Tage P&L-Simulation pro Ticker
+- Strategie: BUY bei Score ≥ +3, SELL bei Score ≤ -3
+- Vergleicht gegen Buy-and-Hold (Alpha-Metrik)
+- Equity-Curve + Trade-Historie als Tabelle
+
+**Datenquellen — Übersicht:**
+| Daten | Provider | Kosten |
+|-------|----------|--------|
+| Aktien-OHLC (bulk) | yfinance | gratis |
+| Aktien-Fundamentaldaten | yfinance | gratis |
+| Aktien-Earnings | yfinance | gratis |
+| Aktien-Insider-Trades | Finnhub | gratis (60/min) |
+| Sektoren-ETFs | yfinance | gratis |
+| Krypto-Marketcap-Ranking | CoinGecko | gratis (1 Call/Run) |
+| Krypto-OHLCV | **Binance Public API** | gratis, **1200/min** |
+| News (Sentiment) | Marketaux | $19-29/Monat |
+| News (Fallback) | Yahoo Finance + Google News RSS | gratis |
+| Reddit-Buzz | public JSON-Endpoint | gratis (anonym) |
+| Fear & Greed Krypto | alternative.me | gratis |
+| AI-Sentiment | Anthropic Claude Haiku | ~$3-5/Monat |
 
 ## Roadmap
 
 | Phase | Inhalt | Status |
 |-------|--------|--------|
 | 1 | Daten + technische Indikatoren + Score (40 Aktien) | ✅ |
-| 1.5 | Krypto-Universe Top 40 dynamisch (CoinGecko, OHLC + RSI/MACD) | ✅ |
+| 1.5 | Krypto-Universe Top 40 dynamisch (jetzt mit Binance OHLCV + Volume) | ✅ |
 | 2 | News-Aggregation (Marketaux + Yahoo + Google + Finnhub, dedup) | ✅ |
 | 2.5 | Reddit-Buzz (10+8 Subreddits, parallel, mit Velocity) | ✅ |
 | 2.7 | Streamlit-Dashboard (Treemap, Logos, Sparklines, TradingView) | ✅ |
 | 2.8 | Market-Context (Fear&Greed + Sektoren-ETFs) | ✅ |
-| 2.9 | Earnings-Tracker + Score-Upgrade (Volume, 52w) | ✅ |
+| 2.9 | Earnings + Insider + Fundamentaldaten + Watchlist | ✅ |
 | 3 | Claude AI-Sentiment-Fusion (Hook im Code) | ✅ Code drin, Key optional |
-| 4 | Erweiterte Earnings: Surprise-Tracking + Konsens-Daten | offen |
+| 3.5 | Backtest-Engine (90-Tage P&L, Alpha vs Buy-and-Hold) | ✅ |
+| 4 | Earnings-Surprise-Tracking + Konsens-Daten | offen |
 | 5 | Telegram-Bot für tägliche Alerts | offen |
-| 6 | SQLite-Storage + Backtesting + History-Charts | offen |
+| 6 | SQLite-Storage + History-Charts | offen |
 | 7 | Swissquote-Whitelist als Filter | offen |
 | 4 | Earnings-Tracking + Surprise-Signale | offen |
 | 5 | Telegram-Bot für tägliche Alerts | offen |

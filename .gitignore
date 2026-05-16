@@ -9,3 +9,4 @@ data/cache/
 .DS_Store
 .vscode/
 .idea/
+watchlist.json

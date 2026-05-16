@@ -36,12 +36,16 @@ from main import (
     US_STOCKS,
     analyze_all_stocks,
     analyze_crypto,
+    backtest_ticker,
     claude_sentiment_fusion,
     fetch_fear_greed_crypto,
     fetch_news,
     fetch_reddit_buzz_bulk,
     fetch_sector_performance,
+    load_watchlist,
+    news_velocity,
     recommendation_label,
+    toggle_watchlist,
 )
 
 # ----------------------------------------------------------------------------
@@ -97,6 +101,29 @@ def cached_claude(ticker: str, news_key: str, reddit_key: str,
                   headlines: tuple, posts: tuple):
     """Cache Claude-Resultate aggressiv (~$ kostet pro Call)."""
     return claude_sentiment_fusion(ticker, list(headlines), list(posts))
+
+
+# Watchlist init (lädt einmal pro Session aus JSON)
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
+
+
+def fmt_marketcap(mc: float | None) -> str:
+    if not mc:
+        return "—"
+    if mc >= 1e12:
+        return f"${mc / 1e12:.2f}T"
+    if mc >= 1e9:
+        return f"${mc / 1e9:.1f}B"
+    if mc >= 1e6:
+        return f"${mc / 1e6:.0f}M"
+    return f"${mc:,.0f}"
+
+
+def fmt_pct(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v * 100:.1f}%" if abs(v) < 5 else f"{v:.1f}%"
 
 
 # ----------------------------------------------------------------------------
@@ -236,8 +263,10 @@ def render_ticker_card(
     tv_symbol: str = "",
     asset_type: str = "stock",
     earnings_date: str | None = None,
+    fundamentals: dict | None = None,
+    insider: dict | None = None,
 ):
-    """Karte pro Ticker mit Logo, Sparkline, Label, Earnings-Badge."""
+    """Karte pro Ticker mit Logo, Sparkline, Label, Earnings/Insider/News-Velocity-Badges."""
     with st.container(border=True):
         col_logo, col_info, col_chart, col_label = st.columns([1, 3.2, 2, 1.5])
 
@@ -266,6 +295,10 @@ def render_ticker_card(
                     pass
             if buzz and buzz.get("velocity", 0) >= 2:
                 badges.append(f":red[🔥 Reddit-Spike {buzz['velocity']}x]")
+            if insider and insider.get("buys", 0) >= 2 and insider.get("net_shares", 0) > 0:
+                badges.append(f":green[💼 Insider-Käufe ({insider['buys']})]")
+            elif insider and insider.get("sells", 0) >= 3 and insider.get("net_shares", 0) < 0:
+                badges.append(f":red[💼 Insider-Verkäufe ({insider['sells']})]")
             if badges:
                 st.markdown(" · ".join(badges))
 
@@ -281,6 +314,31 @@ def render_ticker_card(
             st.markdown(render_label_badge(label, big=True), unsafe_allow_html=True)
             if extra_metric:
                 st.caption(extra_metric)
+            # Star-Button für Watchlist
+            is_starred = ticker in st.session_state.watchlist
+            star_label = "★ in Watchlist" if is_starred else "☆ Watch"
+            if st.button(star_label, key=f"star_{asset_type}_{ticker}", width="stretch"):
+                st.session_state.watchlist = toggle_watchlist(ticker)
+                st.rerun()
+
+        # Fundamentaldaten-Streifen (nur für Aktien)
+        if fundamentals and asset_type == "stock":
+            f = fundamentals
+            fund_items = []
+            if f.get("market_cap"):
+                fund_items.append(f"**MCap:** {fmt_marketcap(f['market_cap'])}")
+            if f.get("pe"):
+                fund_items.append(f"**P/E:** {f['pe']:.1f}")
+            if f.get("forward_pe"):
+                fund_items.append(f"**fwd P/E:** {f['forward_pe']:.1f}")
+            if f.get("dividend_yield"):
+                fund_items.append(f"**Div:** {fmt_pct(f['dividend_yield'])}")
+            if f.get("beta"):
+                fund_items.append(f"**β:** {f['beta']:.2f}")
+            if f.get("revenue_growth"):
+                fund_items.append(f"**Rev-Growth:** {fmt_pct(f['revenue_growth'])}")
+            if fund_items:
+                st.caption(" · ".join(fund_items))
 
         with st.expander("Details: TradingView-Chart · News · Reddit · AI-Sentiment"):
             # TradingView Chart
@@ -598,62 +656,79 @@ m4.metric("Earnings <14d", earnings_soon)
 # ============================================================================
 # TABS
 # ============================================================================
-tab_stocks, tab_crypto, tab_all = st.tabs(
+wl_count = len([t for t in st.session_state.watchlist
+                if t in [s["ticker"] for s in stock_rows] + [c["ticker"] for c in crypto_rows]])
+tab_stocks, tab_crypto, tab_all, tab_watchlist, tab_backtest = st.tabs(
     [f"US-Aktien ({len(stock_rows_f)})",
      f"Krypto ({len(crypto_rows_f)})",
-     "Alle Empfehlungen"]
+     "Alle Empfehlungen",
+     f"★ Watchlist ({wl_count})",
+     "Backtest"]
 )
+
+def render_stock_card(s: dict):
+    """Wrapper für eine Aktie."""
+    ohlc = stock_ohlc.get(s["ticker"])
+    sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
+    render_ticker_card(
+        label=s["label"],
+        ticker=s["ticker"],
+        name="",
+        logo=s.get("logo", ""),
+        price=s["price"],
+        signals=f"RSI {s['rsi']:.1f}  ·  {s['signals']}",
+        sparkline_data=sparkline,
+        extra_metric=f"Score {s['score']:+d}",
+        buzz=s.get("buzz"),
+        tv_symbol=tradingview_symbol(s["ticker"], "stock"),
+        asset_type="stock",
+        earnings_date=s.get("earnings_date"),
+        fundamentals=s.get("fundamentals"),
+        insider=s.get("insider"),
+    )
+
+
+def render_crypto_card(c: dict):
+    """Wrapper für eine Krypto."""
+    ohlc = crypto_ohlc.get(c["ticker"])
+    sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
+    rsi_str = f"RSI {c['rsi']:.1f}  ·  " if c.get("rsi") else ""
+    render_ticker_card(
+        label=c["label"],
+        ticker=c["ticker"],
+        name=c["name"],
+        logo=c.get("logo", ""),
+        price=c["price"],
+        signals=(
+            f"{rsi_str}24h {c['change_24h']:+.1f}%  ·  "
+            f"7d {c['change_7d']:+.1f}%  ·  30d {c['change_30d']:+.1f}%"
+        ),
+        sparkline_data=sparkline,
+        extra_metric=f"Score {c['score']:+d}",
+        buzz=c.get("buzz"),
+        tv_symbol=tradingview_symbol(c["ticker"], "crypto"),
+        asset_type="crypto",
+    )
+
 
 with tab_stocks:
     if not stock_rows_f:
         st.info("Keine Aktien matchen die Filter.")
     for s in stock_rows_f:
-        ohlc = stock_ohlc.get(s["ticker"])
-        sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
-        render_ticker_card(
-            label=s["label"],
-            ticker=s["ticker"],
-            name="",
-            logo=s.get("logo", ""),
-            price=s["price"],
-            signals=f"RSI {s['rsi']:.1f}  ·  {s['signals']}",
-            sparkline_data=sparkline,
-            extra_metric=f"Score {s['score']:+d}",
-            buzz=s.get("buzz"),
-            tv_symbol=tradingview_symbol(s["ticker"], "stock"),
-            asset_type="stock",
-            earnings_date=s.get("earnings_date"),
-        )
+        render_stock_card(s)
 
 with tab_crypto:
     if not crypto_rows_f:
         st.info("Keine Kryptos matchen die Filter.")
     for c in crypto_rows_f:
-        ohlc = crypto_ohlc.get(c["ticker"])
-        sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
-        rsi_str = f"RSI {c['rsi']:.1f}  ·  " if c.get("rsi") else ""
-        render_ticker_card(
-            label=c["label"],
-            ticker=c["ticker"],
-            name=c["name"],
-            logo=c.get("logo", ""),
-            price=c["price"],
-            signals=(
-                f"{rsi_str}24h {c['change_24h']:+.1f}%  ·  "
-                f"7d {c['change_7d']:+.1f}%  ·  30d {c['change_30d']:+.1f}%"
-            ),
-            sparkline_data=sparkline,
-            extra_metric=f"Score {c['score']:+d}",
-            buzz=c.get("buzz"),
-            tv_symbol=tradingview_symbol(c["ticker"], "crypto"),
-            asset_type="crypto",
-        )
+        render_crypto_card(c)
 
 with tab_all:
     st.subheader("Alle Assets sortiert nach Empfehlung")
     table = []
     for a in all_assets:
         buzz = a.get("buzz") or {}
+        ins = a.get("insider") or {}
         table.append({
             "Ticker": a["ticker"],
             "Typ": "Aktie" if a["type"] == "stock" else "Krypto",
@@ -662,6 +737,7 @@ with tab_all:
             "Preis": f"${a['price']:,.2f}" if a["price"] >= 1 else f"${a['price']:.6f}",
             "Mentions": buzz.get("mentions", 0),
             "Velocity": buzz.get("velocity", 0),
+            "Insider-Käufe": ins.get("buys", 0),
             "Earnings": a.get("earnings_date") or "",
             "Signale": a["signals"],
         })
@@ -669,6 +745,97 @@ with tab_all:
         st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
     else:
         st.info("Keine Daten nach Filterung.")
+
+
+with tab_watchlist:
+    st.subheader("Watchlist · Deine gestarteten Picks")
+    wl = st.session_state.watchlist
+    if not wl:
+        st.info("Watchlist leer. Klick auf '☆ Watch' bei einem Ticker, um ihn zur Watchlist hinzuzufügen.")
+    else:
+        wl_stocks = [s for s in stock_rows if s["ticker"] in wl]
+        wl_crypto = [c for c in crypto_rows if c["ticker"] in wl]
+        if wl_stocks:
+            st.markdown(f"#### Aktien ({len(wl_stocks)})")
+            for s in wl_stocks:
+                render_stock_card(s)
+        if wl_crypto:
+            st.markdown(f"#### Krypto ({len(wl_crypto)})")
+            for c in wl_crypto:
+                render_crypto_card(c)
+        st.divider()
+        if st.button("Watchlist komplett leeren", type="secondary"):
+            for t in list(wl):
+                toggle_watchlist(t)
+            st.session_state.watchlist = []
+            st.rerun()
+
+
+with tab_backtest:
+    st.subheader("Backtest · 90-Tage P&L-Simulation")
+    st.caption(
+        "Simulation: Ab Tag 50 wird täglich der Score berechnet. "
+        "BUY bei Score ≥ +3, SELL bei Score ≤ -3. "
+        "Startkapital $10'000. Vergleich gegen Buy-and-Hold."
+    )
+
+    bt_universe = ["– Aktien –"] + [s["ticker"] for s in stock_rows] + \
+                  ["– Krypto –"] + [c["ticker"] for c in crypto_rows]
+    bt_selection = st.selectbox(
+        "Asset wählen",
+        bt_universe,
+        index=1 if len(bt_universe) > 1 else 0,
+    )
+
+    if bt_selection and not bt_selection.startswith("–"):
+        # Suche OHLC für gewählten Ticker (Aktien oder Krypto)
+        bt_df = stock_ohlc.get(bt_selection) or crypto_ohlc.get(bt_selection)
+        if bt_df is None or len(bt_df) < 60:
+            st.warning("Nicht genug OHLC-Daten für Backtest.")
+        else:
+            result = backtest_ticker(bt_df, bt_selection, initial_capital=10000)
+
+            # Header-Metrics
+            m_a, m_b, m_c, m_d, m_e = st.columns(5)
+            m_a.metric("Strategie-Return", f"{result['total_return_pct']:+.2f}%")
+            m_b.metric("Buy-and-Hold", f"{result['buy_hold_pct']:+.2f}%")
+            alpha = result["alpha_pct"]
+            m_c.metric("Alpha", f"{alpha:+.2f}%",
+                       delta_color="normal" if alpha >= 0 else "inverse")
+            m_d.metric("Trades", result["n_trades"])
+            m_e.metric("Win-Rate", f"{result['win_rate']:.1f}%")
+
+            # Equity-Curve
+            if result["equity_curve"]:
+                ec_df = pd.DataFrame({
+                    "day": list(range(len(result["equity_curve"]))),
+                    "equity": result["equity_curve"],
+                })
+                fig_ec = go.Figure()
+                fig_ec.add_trace(go.Scatter(
+                    x=ec_df["day"], y=ec_df["equity"],
+                    line=dict(color="#16a34a", width=2),
+                    fill="tozeroy", fillcolor="rgba(22,163,74,0.15)",
+                    name="Strategie-Equity",
+                ))
+                fig_ec.add_hline(
+                    y=10000, line=dict(color="#888", dash="dash"),
+                    annotation_text="Startkapital",
+                )
+                fig_ec.update_layout(
+                    height=320, template="plotly_dark",
+                    margin=dict(t=20, b=20, l=20, r=20),
+                    yaxis_title="Equity ($)", xaxis_title="Trading-Tag",
+                )
+                st.plotly_chart(fig_ec, width="stretch")
+
+            # Trades-Tabelle
+            if result["trades"]:
+                st.markdown("#### Trade-Historie")
+                trades_df = pd.DataFrame(result["trades"])
+                st.dataframe(trades_df, width="stretch", hide_index=True)
+            else:
+                st.info("Keine BUY/SELL-Signale im Backtest-Zeitraum.")
 
 
 st.divider()

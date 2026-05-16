@@ -322,6 +322,116 @@ def analyze_stock(ticker: str) -> dict | None:
     return analyze_stock_df(df, ticker)
 
 
+def fetch_fundamentals(ticker: str) -> dict:
+    """Fundamentaldaten via yfinance.Ticker.info (gratis)."""
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
+        return {}
+    return {
+        "market_cap": info.get("marketCap"),
+        "pe": info.get("trailingPE"),
+        "forward_pe": info.get("forwardPE"),
+        "dividend_yield": info.get("dividendYield"),
+        "beta": info.get("beta"),
+        "eps_growth": info.get("earningsGrowth"),
+        "revenue_growth": info.get("revenueGrowth"),
+        "profit_margin": info.get("profitMargins"),
+        "52w_high": info.get("fiftyTwoWeekHigh"),
+        "52w_low": info.get("fiftyTwoWeekLow"),
+        "sector_yf": info.get("sector"),
+    }
+
+
+def fetch_fundamentals_bulk(tickers: list[str], max_workers: int = 8) -> dict[str, dict]:
+    """Parallele Fundamentaldaten-Fetches."""
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_fundamentals, t): t for t in tickers}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            try:
+                out[t] = fut.result()
+            except Exception:
+                out[t] = {}
+    return out
+
+
+def fetch_insider_trades(ticker: str) -> dict:
+    """Aggregierte Insider-Trades letzte 30 Tage via Finnhub.
+
+    Liefert {buys, sells, net_shares, net_value, last_trade_date}.
+    Wenn FINNHUB_API_KEY fehlt, leer.
+    """
+    empty = {"buys": 0, "sells": 0, "net_shares": 0, "net_value": 0.0, "last_trade_date": None}
+    if not FINNHUB_API_KEY:
+        return empty
+    today = datetime.now(timezone.utc).date()
+    since = today - timedelta(days=30)
+    url = "https://finnhub.io/api/v1/stock/insider-transactions"
+    params = {"symbol": ticker, "from": since.isoformat(),
+              "to": today.isoformat(), "token": FINNHUB_API_KEY}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        items = r.json().get("data", [])
+    except Exception:
+        return empty
+    buys = sells = 0
+    net_shares = 0
+    net_value = 0.0
+    last_date = None
+    for it in items:
+        change = it.get("change") or 0
+        price = it.get("transactionPrice") or 0
+        if change > 0:
+            buys += 1
+        elif change < 0:
+            sells += 1
+        net_shares += change
+        net_value += change * price
+        d = it.get("transactionDate") or it.get("filingDate")
+        if d and (last_date is None or d > last_date):
+            last_date = d
+    return {
+        "buys": buys, "sells": sells,
+        "net_shares": int(net_shares),
+        "net_value": round(net_value, 2),
+        "last_trade_date": last_date,
+    }
+
+
+def fetch_insider_trades_bulk(tickers: list[str], max_workers: int = 6) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    if not FINNHUB_API_KEY:
+        return {t: {"buys": 0, "sells": 0, "net_shares": 0,
+                    "net_value": 0.0, "last_trade_date": None} for t in tickers}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_insider_trades, t): t for t in tickers}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            try:
+                out[t] = fut.result()
+            except Exception:
+                out[t] = {"buys": 0, "sells": 0, "net_shares": 0,
+                          "net_value": 0.0, "last_trade_date": None}
+    return out
+
+
+def news_velocity(headlines: list[dict]) -> tuple[int, float]:
+    """Wie viele News heute vs Durchschnitt der letzten N Tage.
+
+    Liefert (today_count, velocity_x). velocity > 1 = mehr News als üblich.
+    """
+    if not headlines:
+        return 0, 0.0
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_count = sum(1 for h in headlines if h.get("date") == today_str)
+    avg_per_day = len(headlines) / max(NEWS_LOOKBACK_DAYS, 1)
+    velocity = (today_count / avg_per_day) if avg_per_day > 0 else 0
+    return today_count, round(velocity, 2)
+
+
 def fetch_earnings_calendar(ticker: str) -> str | None:
     """Liefert das nächste Earnings-Datum (ISO-String) wenn innerhalb der nächsten 14 Tage."""
     try:
@@ -371,15 +481,34 @@ def fetch_earnings_calendar_bulk(tickers: list[str], max_workers: int = 8) -> di
 
 
 def analyze_all_stocks() -> tuple[list[dict], dict[str, pd.DataFrame]]:
-    """Bulk-Variante: scort alle US_STOCKS inkl. Earnings."""
+    """Bulk-Variante: scort alle US_STOCKS inkl. Earnings + Fundamentals + Insider."""
     data = fetch_stock_data_bulk(US_STOCKS)
-    earnings = fetch_earnings_calendar_bulk(list(data.keys()))
+    tickers_with_data = list(data.keys())
+
+    # Parallele Zusatz-Fetches (alle gleichzeitig)
+    earnings = fetch_earnings_calendar_bulk(tickers_with_data)
+    fundamentals = fetch_fundamentals_bulk(tickers_with_data)
+    insider = fetch_insider_trades_bulk(tickers_with_data)
+
     results = []
     for t in US_STOCKS:
         if t not in data:
             continue
         try:
-            results.append(analyze_stock_df(data[t], t, earnings.get(t)))
+            row = analyze_stock_df(data[t], t, earnings.get(t))
+            row["fundamentals"] = fundamentals.get(t, {})
+            row["insider"] = insider.get(t, {"buys": 0, "sells": 0,
+                                              "net_shares": 0, "net_value": 0.0,
+                                              "last_trade_date": None})
+            # Insider-Boost in Score
+            ins = row["insider"]
+            if ins["buys"] >= 2 and ins["net_shares"] > 0:
+                row["score"] += 1
+                row["signals"] += ", Insider-Käufe"
+            elif ins["sells"] >= 3 and ins["net_shares"] < 0:
+                row["score"] -= 1
+                row["signals"] += ", Insider-Verkäufe"
+            results.append(row)
         except Exception:
             continue
     return results, data
@@ -388,54 +517,77 @@ def analyze_all_stocks() -> tuple[list[dict], dict[str, pd.DataFrame]]:
 # ============================================================================
 # KRYPTO-ANALYSE
 # ============================================================================
-def fetch_crypto_ohlc(coingecko_id: str, days: int = 90) -> pd.DataFrame | None:
-    """OHLC für eine Krypto-Coin via CoinGecko (mit Retry bei Rate-Limit)."""
-    url = f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/ohlc"
-    params = {"vs_currency": "usd", "days": days}
-    data = _coingecko_get(url, params)
-    if not data or len(data) < 30:
-        return None
-    try:
-        df = pd.DataFrame(data, columns=["ts", "Open", "High", "Low", "Close"])
-        df["Volume"] = 0  # CoinGecko OHLC liefert kein Volume
-        df.index = pd.to_datetime(df["ts"], unit="ms")
-        df = df.drop(columns=["ts"])
-        return df
-    except Exception:
-        return None
+def fetch_crypto_ohlcv_binance(ticker: str, days: int = 90) -> pd.DataFrame | None:
+    """OHLCV via Binance Public API (gratis, 1200 req/min, KEIN Key).
+
+    Versucht USDT-Paar zuerst, fällt auf BUSD/USDC zurück. Liefert auch Volume.
+    """
+    for quote in ("USDT", "BUSD", "USDC"):
+        symbol = f"{ticker.upper()}{quote}"
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": "1d", "limit": days}
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 400:
+                continue  # Symbol existiert nicht, nächstes Quote-Paar probieren
+            r.raise_for_status()
+            data = r.json()
+            if not data or len(data) < 30:
+                continue
+            df = pd.DataFrame(data, columns=[
+                "open_time", "Open", "High", "Low", "Close", "Volume",
+                "close_time", "qav", "ntrades", "tbbav", "tbqav", "ignore",
+            ])
+            df["Open"] = df["Open"].astype(float)
+            df["High"] = df["High"].astype(float)
+            df["Low"] = df["Low"].astype(float)
+            df["Close"] = df["Close"].astype(float)
+            df["Volume"] = df["Volume"].astype(float)
+            df.index = pd.to_datetime(df["open_time"], unit="ms")
+            return df[["Open", "High", "Low", "Close", "Volume"]]
+        except Exception:
+            continue
+    return None
 
 
-def fetch_crypto_ohlc_bulk(coingecko_ids: list[str], max_workers: int = 4) -> dict[str, pd.DataFrame]:
-    """Parallel mit niedrigem max_workers, weil CoinGecko-Free-Tier ~30 calls/min."""
+def fetch_crypto_ohlc_bulk(tickers: list[str], max_workers: int = 12) -> dict[str, pd.DataFrame]:
+    """Parallel via Binance (gratis, hohe Limits → wir können aggressive parallelisieren).
+
+    Erwartet eine Liste von Krypto-TICKERN (z.B. ["BTC", "ETH", ...]), nicht IDs.
+    """
     out: dict[str, pd.DataFrame] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(fetch_crypto_ohlc, cid): cid for cid in coingecko_ids}
+        futures = {ex.submit(fetch_crypto_ohlcv_binance, t): t for t in tickers}
         for fut in as_completed(futures):
-            cid = futures[fut]
+            t = futures[fut]
             try:
                 df = fut.result()
                 if df is not None:
-                    out[cid] = df
+                    out[t] = df
             except Exception:
                 continue
     return out
 
 
 def analyze_crypto(top_n: int = 40) -> tuple[list[dict], dict[str, pd.DataFrame]]:
-    """Holt Top-N Kryptos + OHLC und scort sie mit RSI/MACD/SMA.
+    """Holt Top-N Kryptos + OHLCV (Binance) und scort sie mit RSI/MACD/SMA + Volume.
 
-    Liefert (rows, ohlc_dict). ohlc_dict ist gekeyed nach Ticker (nicht id).
+    Liefert (rows, ohlc_dict). ohlc_dict ist gekeyed nach TICKER.
+    Marketcap-Ranking via CoinGecko (1 Call, gecacht). OHLCV via Binance (gratis).
     """
     coins = get_top_cryptos(top_n)
-    ohlc_data = fetch_crypto_ohlc_bulk(list(coins.keys()))
+    if not coins:
+        return [], {}
+
+    tickers = [c["ticker"] for c in coins.values()]
+    ohlc_by_ticker = fetch_crypto_ohlc_bulk(tickers)
 
     results = []
-    ohlc_by_ticker: dict[str, pd.DataFrame] = {}
     for cid, c in coins.items():
         ticker = c["ticker"]
-        df = ohlc_data.get(cid)
+        df = ohlc_by_ticker.get(ticker)
 
-        # Tech-Indikatoren wenn OHLC verfügbar
+        # Tech-Indikatoren wenn OHLCV verfügbar (jetzt mit echtem Volume!)
         ind_score = 0
         ind_signals: list[str] = []
         rsi = None
@@ -444,9 +596,8 @@ def analyze_crypto(top_n: int = 40) -> tuple[list[dict], dict[str, pd.DataFrame]
                 ind = _compute_indicators(df)
                 ind_score, ind_signals = _score_from_indicators(ind, False)
                 rsi = round(ind["rsi"], 1)
-                ohlc_by_ticker[ticker] = df
             except Exception:
-                df = None
+                pass
 
         # Performance-Signale (zusätzlich)
         perf_score, perf_signals = 0, []
@@ -939,6 +1090,129 @@ def recommendation_label(score: int, mentions_24h: int = 0, velocity: float = 0,
     if effective >= -2:
         return "REDUCE"
     return "SELL"
+
+
+# ============================================================================
+# WATCHLIST (JSON-Persistenz, lokal)
+# ============================================================================
+import json
+from pathlib import Path
+
+WATCHLIST_PATH = Path(__file__).parent / "watchlist.json"
+
+
+def load_watchlist() -> list[str]:
+    if not WATCHLIST_PATH.exists():
+        return []
+    try:
+        return json.loads(WATCHLIST_PATH.read_text())
+    except Exception:
+        return []
+
+
+def save_watchlist(tickers: list[str]) -> None:
+    """Speichert die Watchlist auf Disk. Dedup + Sort."""
+    deduped = sorted(set(tickers))
+    WATCHLIST_PATH.write_text(json.dumps(deduped, indent=2))
+
+
+def toggle_watchlist(ticker: str) -> list[str]:
+    """Toggles einen Ticker in der Watchlist und persistiert."""
+    current = load_watchlist()
+    if ticker in current:
+        current.remove(ticker)
+    else:
+        current.append(ticker)
+    save_watchlist(current)
+    return current
+
+
+# ============================================================================
+# BACKTESTING: 90-Tage P&L-Simulation
+# ============================================================================
+def backtest_ticker(df: pd.DataFrame, ticker: str = "", initial_capital: float = 10000) -> dict:
+    """Simuliert: jeden Tag Score berechnen, BUY (Score>=3) und SELL (Score<=-3).
+
+    Vereinfacht: keine Position-Sizing-Logik, alles in/alles out.
+    Liefert {trades, win_rate, total_return_pct, sharpe, max_drawdown, equity_curve}.
+    """
+    if df is None or len(df) < 60:
+        return {"trades": [], "win_rate": 0, "total_return_pct": 0,
+                "final_equity": initial_capital, "equity_curve": [],
+                "buy_hold_pct": 0, "alpha_pct": 0}
+
+    closes = df["Close"].squeeze()
+    trades: list[dict] = []
+    equity = initial_capital
+    shares = 0
+    entry_price = 0
+    entry_date = None
+    equity_curve = []
+
+    # Brauche mind. 50 Tage Lookback für SMA50 + 30 für RSI, also start ab Index 50
+    for i in range(50, len(df)):
+        sub = df.iloc[: i + 1]
+        try:
+            ind = _compute_indicators(sub)
+            score, _ = _score_from_indicators(ind, False)
+        except Exception:
+            equity_curve.append(equity if shares == 0 else shares * float(closes.iloc[i]))
+            continue
+
+        price = float(closes.iloc[i])
+        date = df.index[i].strftime("%Y-%m-%d") if hasattr(df.index[i], "strftime") else str(df.index[i])
+
+        # SELL-Signal mit offener Position
+        if score <= -3 and shares > 0:
+            sell_value = shares * price
+            pnl_pct = (price - entry_price) / entry_price * 100
+            trades.append({
+                "entry_date": entry_date, "exit_date": date,
+                "entry_price": round(entry_price, 4), "exit_price": round(price, 4),
+                "pnl_pct": round(pnl_pct, 2),
+                "pnl_usd": round(sell_value - (shares * entry_price), 2),
+            })
+            equity = sell_value
+            shares = 0
+            entry_price = 0
+
+        # BUY-Signal ohne Position
+        elif score >= 3 and shares == 0:
+            shares = equity / price
+            entry_price = price
+            entry_date = date
+
+        equity_curve.append(equity if shares == 0 else shares * price)
+
+    # Letzte Position closen
+    if shares > 0:
+        final_price = float(closes.iloc[-1])
+        pnl_pct = (final_price - entry_price) / entry_price * 100
+        trades.append({
+            "entry_date": entry_date, "exit_date": "open",
+            "entry_price": round(entry_price, 4), "exit_price": round(final_price, 4),
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_usd": round(shares * final_price - shares * entry_price, 2),
+        })
+        equity = shares * final_price
+
+    wins = sum(1 for t in trades if t["pnl_pct"] > 0)
+    win_rate = (wins / len(trades) * 100) if trades else 0
+    total_return_pct = (equity / initial_capital - 1) * 100
+    buy_hold_pct = (float(closes.iloc[-1]) / float(closes.iloc[50]) - 1) * 100 if len(df) > 50 else 0
+    alpha_pct = total_return_pct - buy_hold_pct
+
+    return {
+        "ticker": ticker,
+        "trades": trades,
+        "n_trades": len(trades),
+        "win_rate": round(win_rate, 1),
+        "total_return_pct": round(total_return_pct, 2),
+        "buy_hold_pct": round(buy_hold_pct, 2),
+        "alpha_pct": round(alpha_pct, 2),
+        "final_equity": round(equity, 2),
+        "equity_curve": equity_curve,
+    }
 
 
 # ============================================================================
