@@ -265,6 +265,7 @@ def render_ticker_card(
     earnings_date: str | None = None,
     fundamentals: dict | None = None,
     insider: dict | None = None,
+    key_suffix: str = "main",
 ):
     """Karte pro Ticker mit Logo, Sparkline, Label, Earnings/Insider/News-Velocity-Badges."""
     with st.container(border=True):
@@ -308,6 +309,7 @@ def render_ticker_card(
                     render_sparkline(sparkline_data, label),
                     width="stretch",
                     config={"displayModeBar": False},
+                    key=f"spark_{asset_type}_{ticker}_{key_suffix}",
                 )
 
         with col_label:
@@ -317,7 +319,8 @@ def render_ticker_card(
             # Star-Button für Watchlist
             is_starred = ticker in st.session_state.watchlist
             star_label = "★ in Watchlist" if is_starred else "☆ Watch"
-            if st.button(star_label, key=f"star_{asset_type}_{ticker}", width="stretch"):
+            if st.button(star_label, key=f"star_{asset_type}_{ticker}_{key_suffix}",
+                         width="stretch"):
                 st.session_state.watchlist = toggle_watchlist(ticker)
                 st.rerun()
 
@@ -343,7 +346,9 @@ def render_ticker_card(
         with st.expander("Details: TradingView-Chart · News · Reddit · AI-Sentiment"):
             # TradingView Chart
             if tv_symbol:
-                container_id = f"tv_{asset_type}_{ticker.replace('-', '_').replace('.', '_')}"
+                container_id = (
+                    f"tv_{asset_type}_{ticker.replace('-', '_').replace('.', '_')}_{key_suffix}"
+                )
                 render_tradingview(tv_symbol, container_id, height=420)
             else:
                 st.caption("(Kein TradingView-Symbol verfügbar)")
@@ -666,7 +671,7 @@ tab_stocks, tab_crypto, tab_all, tab_watchlist, tab_backtest = st.tabs(
      "Backtest"]
 )
 
-def render_stock_card(s: dict):
+def render_stock_card(s: dict, key_suffix: str = "main"):
     """Wrapper für eine Aktie."""
     ohlc = stock_ohlc.get(s["ticker"])
     sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
@@ -685,10 +690,11 @@ def render_stock_card(s: dict):
         earnings_date=s.get("earnings_date"),
         fundamentals=s.get("fundamentals"),
         insider=s.get("insider"),
+        key_suffix=key_suffix,
     )
 
 
-def render_crypto_card(c: dict):
+def render_crypto_card(c: dict, key_suffix: str = "main"):
     """Wrapper für eine Krypto."""
     ohlc = crypto_ohlc.get(c["ticker"])
     sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
@@ -708,6 +714,7 @@ def render_crypto_card(c: dict):
         buzz=c.get("buzz"),
         tv_symbol=tradingview_symbol(c["ticker"], "crypto"),
         asset_type="crypto",
+        key_suffix=key_suffix,
     )
 
 
@@ -715,13 +722,13 @@ with tab_stocks:
     if not stock_rows_f:
         st.info("Keine Aktien matchen die Filter.")
     for s in stock_rows_f:
-        render_stock_card(s)
+        render_stock_card(s, key_suffix="main")
 
 with tab_crypto:
     if not crypto_rows_f:
         st.info("Keine Kryptos matchen die Filter.")
     for c in crypto_rows_f:
-        render_crypto_card(c)
+        render_crypto_card(c, key_suffix="main")
 
 with tab_all:
     st.subheader("Alle Assets sortiert nach Empfehlung")
@@ -758,11 +765,11 @@ with tab_watchlist:
         if wl_stocks:
             st.markdown(f"#### Aktien ({len(wl_stocks)})")
             for s in wl_stocks:
-                render_stock_card(s)
+                render_stock_card(s, key_suffix="wl")
         if wl_crypto:
             st.markdown(f"#### Krypto ({len(wl_crypto)})")
             for c in wl_crypto:
-                render_crypto_card(c)
+                render_crypto_card(c, key_suffix="wl")
         st.divider()
         if st.button("Watchlist komplett leeren", type="secondary"):
             for t in list(wl):
