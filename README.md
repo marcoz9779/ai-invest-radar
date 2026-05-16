@@ -22,33 +22,50 @@ python main.py
 streamlit run app.py
 ```
 
-## Was das aktuell tut (Phase 1 + 2)
+## Was das aktuell tut
 
-- Holt 3 Monate OHLC-Daten für 15 US-Aktien via `yfinance` (gratis, kein Key)
-- Holt 24h/7d/30d Performance für 8 Kryptos via CoinGecko (gratis, kein Key)
-- Berechnet **RSI**, **MACD**, **SMA20/SMA50**
-- Vergibt einen einfachen, transparenten Score je Asset
-- Listet die Top-Long-Kandidaten
-- Sammelt aktuelle Company-News der letzten 7 Tage je Aktie
-  - **Marketaux** (primär, $19/Monat) – kuratierte Finanz-News mit Sentiment-Score
-  - **Finnhub** (Fallback, gratis)
-  - **NewsAPI** (zweiter Fallback, gratis)
-- Sammelt **Reddit-Buzz** (Mentions + Top-Posts der letzten 7 Tage) je Aktie und Krypto
-  - Aktien: r/wallstreetbets, r/stocks, r/investing, r/StockMarket, r/options
-  - Krypto: r/CryptoCurrency, r/CryptoMarkets, r/Bitcoin, r/ethereum
-  - Läuft **anonym ohne Account** via public JSON-Endpoint. Optional kann eine PRAW-Auth eingerichtet werden, falls man höhere Rate-Limits braucht.
+**Universum (Phase 1):**
+- 40 US-Aktien (kuratierte Marketcap-Top-40, alle Swissquote-handelbar)
+- 40 Kryptos dynamisch via CoinGecko (immer aktuelle Marketcap-Liste, ohne Stablecoins/Wrapped-Tokens)
+- Bulk-OHLC-Fetching via `yfinance.download(multi-ticker)` → 40 Aktien in ~5s statt ~40s
+- Indikatoren: **RSI**, **MACD**, **SMA20/SMA50**
+- Transparenter, regelbasierter Score je Asset
 
-Ohne API-Keys läuft alles inkl. Reddit-Buzz. Nur die News-Sektion wird ohne Marketaux/Finnhub/NewsAPI übersprungen.
+**News (Phase 2) – 4 Quellen parallel + dedupliziert:**
+- **Marketaux** (primär, $19-$29/Monat) – kuratierte Finanz-News mit Sentiment-Score
+- **Yahoo Finance** (gratis via yfinance)
+- **Google News RSS** (gratis)
+- **Finnhub** (gratis als Zusatz-Layer)
+- Headlines werden nach Titel-Hash dedupliziert; Sentiment von Marketaux wird priorisiert
+
+**Reddit-Buzz (Phase 2.5):**
+- 10 Subreddits für Aktien (wallstreetbets, stocks, investing, StockMarket, options, ValueInvesting, SecurityAnalysis, dividends, pennystocks, Daytrading)
+- 8 Subreddits für Krypto (CryptoCurrency, CryptoMarkets, Bitcoin, ethereum, altcoin, defi, CryptoTechnology, SatoshiStreetBets)
+- **Parallele Fetches** für 80 Tickers gleichzeitig (`concurrent.futures`, ~5s statt ~25s)
+- **Mention-Velocity-Indikator** (24h-Rate vs 7d-Durchschnitt) zeigt Hype-Spikes
+- Läuft **anonym ohne Account** via public JSON-Endpoint
+
+**Dashboard (Phase 2.7):**
+- Top-5-Empfehlungen-Karten ganz oben mit Logos und farbigen BUY/WATCH/HOLD/REDUCE/SELL-Badges
+- Pro Ticker: Logo, Sparkline, klares Label, Reddit-Spike-Indikator
+- Lazy-Loading: voller Candlestick, News-Aggregation und Reddit-Posts erst beim Aufklappen
+- Caching (5 Min TTL) reduziert API-Last
+- Filter: Empfehlungs-Typ, Min-Score, Reddit on/off
 
 ## Roadmap
 
 | Phase | Inhalt | Status |
 |-------|--------|--------|
-| 1 | Daten + technische Indikatoren + Score | ✅ |
-| 2 | News-Sammeln (Marketaux + Finnhub + NewsAPI) | ✅ |
-| 2.5 | Reddit-Buzz (PRAW oder anonym) | ✅ |
-| 2.7 | Streamlit-Dashboard (lokal via `streamlit run app.py`) | ✅ |
-| 3 | Sentiment-Analyse mit FinBERT / Claude | nächste |
+| 1 | Daten + technische Indikatoren + Score (40 Aktien) | ✅ |
+| 1.5 | Krypto-Universe Top 40 dynamisch (CoinGecko) | ✅ |
+| 2 | News-Aggregation (Marketaux + Yahoo + Google + Finnhub) | ✅ |
+| 2.5 | Reddit-Buzz (10+8 Subreddits, parallel, mit Velocity) | ✅ |
+| 2.7 | Streamlit-Dashboard (Logos, Sparklines, BUY/WATCH/SELL-Karten) | ✅ |
+| 3 | Sentiment-Fusion mit Claude (News + Reddit → kombinierter Score) | nächste |
+| 4 | Earnings-Tracking + Surprise-Signale | offen |
+| 5 | Telegram-Bot für tägliche Alerts | offen |
+| 6 | SQLite-Storage + Backtesting + History-Charts | offen |
+| 7 | Swissquote-Whitelist als Filter | offen |
 | 4 | Earnings-Tracking + Surprise-Signale | offen |
 | 5 | Telegram-Bot für tägliche Alerts | offen |
 | 6 | SQLite-Storage + Backtesting | offen |
@@ -56,11 +73,13 @@ Ohne API-Keys läuft alles inkl. Reddit-Buzz. Nur die News-Sektion wird ohne Mar
 
 ## Universum
 
-Aktuelle Whitelist (siehe `main.py`):
-- **US-Aktien:** AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA, AMD, AVGO, NFLX, CRM, ORCL, ADBE, PLTR, COIN
-- **Krypto:** BTC, ETH, SOL, ADA, XRP, DOT, LINK, AVAX
+**40 US-Aktien (kurated, Marketcap-sortiert, Swissquote-handelbar):**
+NVDA, MSFT, AAPL, AMZN, GOOGL, META, AVGO, TSLA, BRK-B, LLY, JPM, V, WMT, XOM, MA, UNH, ORCL, COST, JNJ, PG, NFLX, HD, BAC, ABBV, CRM, KO, CVX, AMD, MRK, PEP, ADBE, ACN, CSCO, TMO, MCD, LIN, IBM, PLTR, COIN, INTC
 
-Alle bei Swissquote handelbar. In Phase 7 ersetzen wir das durch einen automatischen Abgleich mit deiner Swissquote-Liste (CSV-Export).
+**40 Kryptos (dynamisch via CoinGecko Top-Marketcap):**
+Wird bei jedem Lauf live geholt — Stablecoins, gold-backed Tokens (PAXG/XAUT) und Wrapped-Varianten (WBTC/WETH/STETH) sind ausgefiltert. So bleibt das Universum automatisch aktuell.
+
+In Phase 7 ersetzen wir die statische Aktien-Whitelist durch einen automatischen Abgleich mit deiner Swissquote-Liste (CSV-Export).
 
 ## API-Keys
 

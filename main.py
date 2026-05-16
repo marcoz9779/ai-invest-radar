@@ -1,18 +1,21 @@
 """
-AI Invest Radar – Phase 2
-Holt Preise + technische Indikatoren für US-Aktien und Krypto,
-berechnet einen transparenten Score, sammelt aktuelle News (Finnhub + NewsAPI)
-und gibt einen Tages-Report aus.
+AI Invest Radar – Phase 1, 2, 2.5, 2.7
+Holt Preise + technische Indikatoren für 40 US-Aktien und Top-40-Kryptos,
+aggregiert News aus mehreren Quellen, sammelt Reddit-Buzz und liefert
+klare Buy/Watch/Hold/Sell-Empfehlungen.
 
-Phase 1 läuft ohne Keys. News (Phase 2) sind optional – wenn Keys in .env
-fehlen, wird die News-Sektion einfach übersprungen.
+CLI:  python main.py
+Web:  streamlit run app.py  (öffnet http://localhost:8501)
 """
 
 import os
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote_plus
 
+import feedparser
 import pandas as pd
 import requests
 import yfinance as yf
@@ -20,7 +23,7 @@ from dotenv import load_dotenv
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 
-warnings.filterwarnings("ignore")  # yfinance ist gesprächig
+warnings.filterwarnings("ignore")
 load_dotenv()
 
 MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY", "").strip()
@@ -31,37 +34,122 @@ REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "ai-invest-radar/0.1").strip()
 
 NEWS_LOOKBACK_DAYS = 7
-MAX_HEADLINES_PER_TICKER = 3
-REDDIT_STOCK_SUBS = "wallstreetbets+stocks+investing+StockMarket+options"
-REDDIT_CRYPTO_SUBS = "CryptoCurrency+CryptoMarkets+Bitcoin+ethereum"
-MAX_REDDIT_POSTS_PER_TICKER = 3
+MAX_HEADLINES_PER_TICKER = 5  # mehr Quellen → mehr Headlines anzeigen
+MAX_REDDIT_POSTS_PER_TICKER = 5
 
 # ----------------------------------------------------------------------------
-# Universum – alle Werte sind bei Swissquote handelbar
+# Universum: Top 40 US-Aktien (Marketcap-sortiert, Swissquote-handelbar)
 # ----------------------------------------------------------------------------
 US_STOCKS = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
-    "AMD", "AVGO", "NFLX", "CRM", "ORCL", "ADBE", "PLTR", "COIN",
+    "NVDA", "MSFT", "AAPL", "AMZN", "GOOGL", "META", "AVGO", "TSLA",
+    "BRK-B", "LLY", "JPM", "V", "WMT", "XOM", "MA", "UNH",
+    "ORCL", "COST", "JNJ", "PG", "NFLX", "HD", "BAC", "ABBV",
+    "CRM", "KO", "CVX", "AMD", "MRK", "PEP", "ADBE", "ACN",
+    "CSCO", "TMO", "MCD", "LIN", "IBM", "PLTR", "COIN", "INTC",
 ]
 
-CRYPTOS = {
-    # CoinGecko-ID : Ticker
-    "bitcoin": "BTC",
-    "ethereum": "ETH",
-    "solana": "SOL",
-    "cardano": "ADA",
-    "ripple": "XRP",
-    "polkadot": "DOT",
-    "chainlink": "LINK",
-    "avalanche-2": "AVAX",
+# Clearbit-Logo-Domains (Ticker → Firmen-Domain)
+STOCK_DOMAINS = {
+    "NVDA": "nvidia.com", "MSFT": "microsoft.com", "AAPL": "apple.com",
+    "AMZN": "amazon.com", "GOOGL": "google.com", "META": "meta.com",
+    "AVGO": "broadcom.com", "TSLA": "tesla.com",
+    "BRK-B": "berkshirehathaway.com", "LLY": "lilly.com",
+    "JPM": "jpmorganchase.com", "V": "visa.com", "WMT": "walmart.com",
+    "XOM": "exxonmobil.com", "MA": "mastercard.com",
+    "UNH": "unitedhealthgroup.com", "ORCL": "oracle.com",
+    "COST": "costco.com", "JNJ": "jnj.com", "PG": "pg.com",
+    "NFLX": "netflix.com", "HD": "homedepot.com",
+    "BAC": "bankofamerica.com", "ABBV": "abbvie.com",
+    "CRM": "salesforce.com", "KO": "coca-cola.com",
+    "CVX": "chevron.com", "AMD": "amd.com", "MRK": "merck.com",
+    "PEP": "pepsico.com", "ADBE": "adobe.com", "ACN": "accenture.com",
+    "CSCO": "cisco.com", "TMO": "thermofisher.com",
+    "MCD": "mcdonalds.com", "LIN": "linde.com", "IBM": "ibm.com",
+    "PLTR": "palantir.com", "COIN": "coinbase.com", "INTC": "intel.com",
 }
 
+STABLECOIN_SYMBOLS = {
+    # Klassische Stablecoins
+    "USDT", "USDC", "DAI", "USDE", "TUSD", "FDUSD", "PYUSD", "USDD",
+    "USDP", "FRAX", "GUSD", "LUSD", "USDS", "RLUSD", "USDG", "USYC",
+    # Gold/Asset-backed (kein Trading-Volatility-Signal)
+    "PAXG", "XAUT", "DGLD",
+    # Tokenized Funds (BlackRock etc.)
+    "BUIDL",
+    # Wrapped Variants — eigener Trade selten sinnvoll
+    "WBTC", "WETH", "WSTETH", "STETH", "WEETH", "WBETH", "RETH", "CBETH",
+}
 
-# ----------------------------------------------------------------------------
-# Aktien-Analyse
-# ----------------------------------------------------------------------------
+# Mehr Subreddits — werden gleichzeitig durchsucht
+REDDIT_STOCK_SUBS = (
+    "wallstreetbets+stocks+investing+StockMarket+options"
+    "+ValueInvesting+SecurityAnalysis+dividends+pennystocks+Daytrading"
+)
+REDDIT_CRYPTO_SUBS = (
+    "CryptoCurrency+CryptoMarkets+Bitcoin+ethereum"
+    "+altcoin+defi+CryptoTechnology+SatoshiStreetBets"
+)
+
+
+# ============================================================================
+# CRYPTO-UNIVERSE: dynamisch Top 40 ohne Stablecoins
+# ============================================================================
+def get_top_cryptos(n: int = 40) -> dict[str, dict]:
+    """Holt die Top-N Coins nach Marketcap (ohne Stablecoins) von CoinGecko.
+
+    Liefert dict {coingecko_id: {ticker, name, image, change_7d, change_30d, price}}.
+    """
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params = {
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": 100,  # Buffer für Stablecoin-Ausfilter
+        "page": 1,
+        "price_change_percentage": "24h,7d,30d",
+    }
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    out: dict[str, dict] = {}
+    for coin in r.json():
+        sym = coin.get("symbol", "").upper()
+        if sym in STABLECOIN_SYMBOLS:
+            continue
+        if len(out) >= n:
+            break
+        out[coin["id"]] = {
+            "ticker": sym,
+            "name": coin.get("name", ""),
+            "image": coin.get("image", ""),
+            "price": coin.get("current_price") or 0,
+            "change_24h": coin.get("price_change_percentage_24h_in_currency") or 0,
+            "change_7d": coin.get("price_change_percentage_7d_in_currency") or 0,
+            "change_30d": coin.get("price_change_percentage_30d_in_currency") or 0,
+        }
+    return out
+
+
+# ============================================================================
+# AKTIEN-ANALYSE
+# ============================================================================
+def fetch_stock_data_bulk(tickers: list[str]) -> dict[str, pd.DataFrame]:
+    """Holt 3 Monate OHLC für alle Tickers in einem Call. Viel schneller als Schleife."""
+    df = yf.download(
+        tickers, period="3mo", interval="1d",
+        progress=False, auto_adjust=True, group_by="ticker", threads=True,
+    )
+    out: dict[str, pd.DataFrame] = {}
+    for t in tickers:
+        try:
+            sub = df[t].dropna(how="all") if len(tickers) > 1 else df
+            if not sub.empty and len(sub) >= 30:
+                out[t] = sub
+        except (KeyError, AttributeError):
+            continue
+    return out
+
+
 def fetch_stock_data(ticker: str) -> pd.DataFrame | None:
-    """Holt 3 Monate OHLC-Daten für einen Ticker. Wird von CLI und Dashboard genutzt."""
+    """Single-Ticker-Variante (für Streamlit-Cache und CLI-Convenience)."""
     df = yf.download(ticker, period="3mo", interval="1d",
                      progress=False, auto_adjust=True)
     if df.empty or len(df) < 30:
@@ -70,7 +158,7 @@ def fetch_stock_data(ticker: str) -> pd.DataFrame | None:
 
 
 def analyze_stock_df(df: pd.DataFrame, ticker: str) -> dict:
-    """Berechnet RSI/MACD/SMA + Score aus einem bestehenden OHLC-DataFrame."""
+    """RSI/MACD/SMA + Score aus OHLC-DataFrame."""
     close = df["Close"].squeeze()
     rsi = float(RSIIndicator(close).rsi().iloc[-1])
     macd_diff = float(MACD(close).macd_diff().iloc[-1])
@@ -78,7 +166,6 @@ def analyze_stock_df(df: pd.DataFrame, ticker: str) -> dict:
     sma_50 = float(SMAIndicator(close, window=50).sma_indicator().iloc[-1])
     price = float(close.iloc[-1])
 
-    # Transparenter Regel-basierter Score
     score, signals = 0, []
     if rsi < 30:
         score += 2; signals.append("RSI oversold")
@@ -101,61 +188,70 @@ def analyze_stock_df(df: pd.DataFrame, ticker: str) -> dict:
         "rsi": round(rsi, 1),
         "score": score,
         "signals": ", ".join(signals),
+        "logo": f"https://logo.clearbit.com/{STOCK_DOMAINS.get(ticker, '')}" if STOCK_DOMAINS.get(ticker) else "",
     }
 
 
 def analyze_stock(ticker: str) -> dict | None:
-    """3 Monate Daten holen + scoren (CLI-Convenience-Wrapper)."""
     df = fetch_stock_data(ticker)
     if df is None:
         return None
     return analyze_stock_df(df, ticker)
 
 
-# ----------------------------------------------------------------------------
-# Krypto-Analyse (CoinGecko, gratis, kein Key)
-# ----------------------------------------------------------------------------
-def analyze_crypto() -> list[dict]:
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": "usd",
-        "ids": ",".join(CRYPTOS.keys()),
-        "price_change_percentage": "24h,7d,30d",
-    }
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-
+def analyze_all_stocks() -> tuple[list[dict], dict[str, pd.DataFrame]]:
+    """Bulk-Variante: scort alle US_STOCKS in einem Rutsch + liefert OHLC-Daten."""
+    data = fetch_stock_data_bulk(US_STOCKS)
     results = []
-    for coin in r.json():
-        ch_7d = coin.get("price_change_percentage_7d_in_currency") or 0
-        ch_30d = coin.get("price_change_percentage_30d_in_currency") or 0
+    for t in US_STOCKS:
+        if t not in data:
+            continue
+        try:
+            results.append(analyze_stock_df(data[t], t))
+        except Exception:
+            continue
+    return results, data
 
+
+# ============================================================================
+# KRYPTO-ANALYSE
+# ============================================================================
+def analyze_crypto(top_n: int = 40) -> list[dict]:
+    """Holt + bewertet die Top-N Kryptos."""
+    coins = get_top_cryptos(top_n)
+    results = []
+    for cid, c in coins.items():
         score, signals = 0, []
-        if ch_7d < -10:
+        if c["change_7d"] < -10:
             score += 2; signals.append("starker 7d-Dip")
-        elif ch_7d > 15:
+        elif c["change_7d"] > 15:
             score -= 1; signals.append("überhitzt 7d")
-        if ch_30d > 20:
+        if c["change_30d"] > 20:
             score += 1; signals.append("Momentum 30d")
-        if ch_30d < -25:
+        if c["change_30d"] < -25:
             score += 1; signals.append("möglicher Boden")
 
         results.append({
-            "ticker": CRYPTOS[coin["id"]],
-            "price": coin["current_price"],
-            "change_7d": round(ch_7d, 1),
-            "change_30d": round(ch_30d, 1),
+            "ticker": c["ticker"],
+            "name": c["name"],
+            "price": c["price"],
+            "change_24h": round(c["change_24h"], 1),
+            "change_7d": round(c["change_7d"], 1),
+            "change_30d": round(c["change_30d"], 1),
             "score": score,
             "signals": ", ".join(signals) or "neutral",
+            "logo": c["image"],
+            "coingecko_id": cid,
         })
     return results
 
 
-# ----------------------------------------------------------------------------
-# News-Sammeln (Phase 2)
-# ----------------------------------------------------------------------------
+# ============================================================================
+# NEWS-SAMMELN: aggregiert + dedupliziert aus mehreren Quellen
+# ============================================================================
 def fetch_news_marketaux(ticker: str) -> list[dict]:
-    """Marketaux liefert kuratierte Finanz-News inkl. per-Entity Sentiment."""
+    if not MARKETAUX_API_KEY:
+        return []
     url = "https://api.marketaux.com/v1/news/all"
     params = {
         "symbols": ticker,
@@ -171,7 +267,6 @@ def fetch_news_marketaux(ticker: str) -> list[dict]:
     r.raise_for_status()
     out = []
     for it in r.json().get("data", []):
-        # Sentiment für genau diesen Ticker rausziehen
         sentiment = None
         for ent in it.get("entities", []):
             if ent.get("symbol", "").upper() == ticker.upper():
@@ -183,24 +278,24 @@ def fetch_news_marketaux(ticker: str) -> list[dict]:
             "headline": (it.get("title") or "").strip(),
             "url": it.get("url", ""),
             "sentiment": sentiment,
+            "provider": "marketaux",
         })
     return out
 
 
 def fetch_news_finnhub(ticker: str) -> list[dict]:
-    """Holt Company-News der letzten NEWS_LOOKBACK_DAYS Tage via Finnhub."""
+    if not FINNHUB_API_KEY:
+        return []
     today = datetime.now(timezone.utc).date()
     since = today - timedelta(days=NEWS_LOOKBACK_DAYS)
     url = "https://finnhub.io/api/v1/company-news"
     params = {
-        "symbol": ticker,
-        "from": since.isoformat(),
-        "to": today.isoformat(),
-        "token": FINNHUB_API_KEY,
+        "symbol": ticker, "from": since.isoformat(),
+        "to": today.isoformat(), "token": FINNHUB_API_KEY,
     }
     r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
-    items = r.json() or []
+    items = (r.json() or [])
     items.sort(key=lambda x: x.get("datetime", 0), reverse=True)
     out = []
     for it in items[:MAX_HEADLINES_PER_TICKER]:
@@ -208,69 +303,149 @@ def fetch_news_finnhub(ticker: str) -> list[dict]:
         out.append({
             "date": ts.strftime("%Y-%m-%d"),
             "source": it.get("source", "?"),
-            "headline": it.get("headline", "").strip(),
+            "headline": (it.get("headline") or "").strip(),
             "url": it.get("url", ""),
             "sentiment": None,
+            "provider": "finnhub",
         })
     return out
 
 
-def fetch_news_newsapi(ticker: str) -> list[dict]:
-    """Fallback: Headlines via NewsAPI (everything-Endpunkt)."""
-    since = (datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)).date()
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": ticker,
-        "from": since.isoformat(),
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": MAX_HEADLINES_PER_TICKER,
-        "apiKey": NEWSAPI_KEY,
-    }
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    out = []
-    for it in r.json().get("articles", [])[:MAX_HEADLINES_PER_TICKER]:
-        out.append({
-            "date": (it.get("publishedAt") or "")[:10],
-            "source": (it.get("source") or {}).get("name", "?"),
-            "headline": (it.get("title") or "").strip(),
-            "url": it.get("url", ""),
-            "sentiment": None,
-        })
-    return out
-
-
-def fetch_news(ticker: str) -> list[dict]:
-    """Priorität: Marketaux (mit Sentiment) > Finnhub > NewsAPI."""
-    if MARKETAUX_API_KEY:
-        try:
-            return fetch_news_marketaux(ticker)
-        except Exception as e:
-            print(f"  Marketaux-Fehler bei {ticker}: {e}")
-    if FINNHUB_API_KEY:
-        try:
-            return fetch_news_finnhub(ticker)
-        except Exception as e:
-            print(f"  Finnhub-Fehler bei {ticker}: {e}")
-    if NEWSAPI_KEY:
-        try:
-            return fetch_news_newsapi(ticker)
-        except Exception as e:
-            print(f"  NewsAPI-Fehler bei {ticker}: {e}")
-    return []
-
-
-# ----------------------------------------------------------------------------
-# Reddit-Buzz (Phase 2.5 – default: anonymer JSON-Endpoint, kein Account nötig)
-# ----------------------------------------------------------------------------
-def _filter_and_pack_posts(raw_posts: list[dict], ticker: str) -> dict:
-    """Whole-word-Ticker-Match + Aggregation zu mentions/upvotes/top-posts."""
+def fetch_news_yahoo(ticker: str) -> list[dict]:
+    """Yahoo Finance News via yfinance (gratis, kein Key)."""
+    try:
+        raw = yf.Ticker(ticker).news or []
+    except Exception:
+        return []
     cutoff = (datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)).timestamp()
+    out = []
+    for it in raw[:MAX_HEADLINES_PER_TICKER * 2]:
+        # yfinance liefert teils nested unter "content"
+        content = it.get("content") or it
+        ts = it.get("providerPublishTime") or 0
+        if not ts and content.get("pubDate"):
+            try:
+                ts = datetime.fromisoformat(
+                    content["pubDate"].replace("Z", "+00:00")
+                ).timestamp()
+            except Exception:
+                ts = 0
+        if ts and ts < cutoff:
+            continue
+        title = content.get("title") or it.get("title", "")
+        url = content.get("canonicalUrl", {}).get("url") if isinstance(content.get("canonicalUrl"), dict) else it.get("link", "")
+        publisher = content.get("provider", {}).get("displayName") if isinstance(content.get("provider"), dict) else it.get("publisher", "Yahoo")
+        if not title:
+            continue
+        out.append({
+            "date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d") if ts else "",
+            "source": publisher or "Yahoo Finance",
+            "headline": title.strip(),
+            "url": url or "",
+            "sentiment": None,
+            "provider": "yahoo",
+        })
+    return out[:MAX_HEADLINES_PER_TICKER]
+
+
+def fetch_news_google_rss(query: str) -> list[dict]:
+    """Google News RSS (gratis, keine Auth). Liefert publisher-Mix."""
+    url = (
+        "https://news.google.com/rss/search?"
+        f"q={quote_plus(query + ' stock')}&hl=en-US&gl=US&ceid=US:en"
+    )
+    try:
+        feed = feedparser.parse(url)
+    except Exception:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)
+    out = []
+    for entry in feed.entries[:MAX_HEADLINES_PER_TICKER * 3]:
+        try:
+            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        except Exception:
+            published = datetime.now(timezone.utc)
+        if published < cutoff:
+            continue
+        source = entry.get("source", {}).get("title", "Google News")
+        out.append({
+            "date": published.strftime("%Y-%m-%d"),
+            "source": source,
+            "headline": entry.get("title", "").strip(),
+            "url": entry.get("link", ""),
+            "sentiment": None,
+            "provider": "google",
+        })
+    return out[:MAX_HEADLINES_PER_TICKER]
+
+
+def _dedup_news(items: list[dict]) -> list[dict]:
+    """Headlines aus mehreren Quellen mergen — gleiche Headline = 1 Eintrag.
+
+    Wenn Sentiment-Score von einer Quelle existiert (Marketaux), wird er bevorzugt.
+    """
+    by_key: dict[str, dict] = {}
+    for it in items:
+        key = (it.get("headline") or "").lower()[:80].strip()
+        if not key:
+            continue
+        if key not in by_key:
+            by_key[key] = it
+            continue
+        # Existing keep, but merge sentiment from Marketaux if available
+        existing = by_key[key]
+        if existing.get("sentiment") is None and it.get("sentiment") is not None:
+            existing["sentiment"] = it["sentiment"]
+    merged = list(by_key.values())
+    merged.sort(key=lambda x: x.get("date", ""), reverse=True)
+    return merged[:MAX_HEADLINES_PER_TICKER]
+
+
+def fetch_news(ticker: str, query_name: str | None = None) -> list[dict]:
+    """Aggregiert News aus allen verfügbaren Quellen parallel + dedupliziert.
+
+    query_name: für Krypto den vollen Namen ("Bitcoin") statt Ticker ("BTC") nutzen,
+    sonst findet Google News nichts Brauchbares.
+    """
+    name = query_name or ticker
+    fetchers = [
+        (fetch_news_marketaux, ticker),
+        (fetch_news_finnhub, ticker),
+        (fetch_news_yahoo, ticker),
+        (fetch_news_google_rss, name),
+    ]
+    items: list[dict] = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(fn, arg): fn.__name__ for fn, arg in fetchers}
+        for fut in as_completed(futures):
+            try:
+                items.extend(fut.result())
+            except Exception:
+                continue
+    return _dedup_news(items)
+
+
+def _format_sentiment(score: float | None) -> str:
+    if score is None:
+        return ""
+    if score > 0.15:
+        return f" [+] {score:+.2f}"
+    if score < -0.15:
+        return f" [-] {score:+.2f}"
+    return f" [~] {score:+.2f}"
+
+
+# ============================================================================
+# REDDIT-BUZZ: parallel über mehr Subreddits, mit 24h-Velocity
+# ============================================================================
+def _filter_and_pack_posts(raw: list[dict], ticker: str) -> dict:
+    cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)).timestamp()
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp()
     posts = []
+    mentions_24h = 0
     total_upvotes = 0
-    for p in raw_posts:
-        if p["created_utc"] < cutoff:
+    for p in raw:
+        if p["created_utc"] < cutoff_7d:
             continue
         haystack = f" {p['title'].upper()} "
         if (
@@ -287,31 +462,38 @@ def _filter_and_pack_posts(raw_posts: list[dict], ticker: str) -> dict:
             "url": f"https://reddit.com{p['permalink']}",
         })
         total_upvotes += p["score"]
+        if p["created_utc"] >= cutoff_24h:
+            mentions_24h += 1
     posts.sort(key=lambda x: x["score"], reverse=True)
+    # Velocity: 24h-Rate als x-Fache der 7d-Durchschnittsrate
+    expected_24h = len(posts) / NEWS_LOOKBACK_DAYS if posts else 0
+    velocity = (mentions_24h / expected_24h) if expected_24h > 0 else 0
     return {
         "mentions": len(posts),
+        "mentions_24h": mentions_24h,
+        "velocity": round(velocity, 1),  # 1.0 = normal, >2.0 = Hype-Spike
         "upvotes": total_upvotes,
         "posts": posts[:MAX_REDDIT_POSTS_PER_TICKER],
     }
 
 
 def fetch_reddit_buzz_public(ticker: str, subs: str) -> dict:
-    """Öffentlicher Reddit-JSON-Endpoint – keine Authentifizierung nötig."""
+    """Reddit public JSON-Endpoint, keine Auth."""
     url = f"https://www.reddit.com/r/{subs}/search.json"
     params = {
         "q": f"${ticker} OR {ticker}",
         "restrict_sr": "on",
         "t": "week",
         "sort": "new",
-        "limit": 25,
+        "limit": 50,
     }
     headers = {"User-Agent": REDDIT_USER_AGENT}
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=15)
+        r = requests.get(url, params=params, headers=headers, timeout=20)
         r.raise_for_status()
     except Exception as e:
-        print(f"  Reddit-Fehler bei {ticker}: {e}")
-        return {"mentions": 0, "upvotes": 0, "posts": []}
+        return {"mentions": 0, "mentions_24h": 0, "velocity": 0,
+                "upvotes": 0, "posts": [], "error": str(e)}
 
     raw = []
     for child in r.json().get("data", {}).get("children", []):
@@ -324,7 +506,6 @@ def fetch_reddit_buzz_public(ticker: str, subs: str) -> dict:
             "num_comments": int(d.get("num_comments", 0)),
             "permalink": d.get("permalink", ""),
         })
-    time.sleep(1)  # höflich gegenüber Reddits Rate-Limit (~60/min anonym)
     return _filter_and_pack_posts(raw, ticker)
 
 
@@ -332,7 +513,6 @@ _reddit_praw = None
 
 
 def _get_reddit_praw():
-    """Optionaler PRAW-Client für authentifizierte Calls (höhere Limits)."""
     global _reddit_praw
     if _reddit_praw is not None:
         return _reddit_praw
@@ -351,11 +531,12 @@ def _get_reddit_praw():
 def fetch_reddit_buzz_praw(ticker: str, subs: str) -> dict:
     reddit = _get_reddit_praw()
     if reddit is None:
-        return {"mentions": 0, "upvotes": 0, "posts": []}
+        return {"mentions": 0, "mentions_24h": 0, "velocity": 0,
+                "upvotes": 0, "posts": []}
     raw = []
     try:
         for s in reddit.subreddit(subs).search(
-            f"${ticker} OR {ticker}", sort="new", time_filter="week", limit=25
+            f"${ticker} OR {ticker}", sort="new", time_filter="week", limit=50
         ):
             raw.append({
                 "created_utc": s.created_utc,
@@ -365,115 +546,81 @@ def fetch_reddit_buzz_praw(ticker: str, subs: str) -> dict:
                 "num_comments": int(s.num_comments),
                 "permalink": s.permalink,
             })
-    except Exception as e:
-        print(f"  Reddit-PRAW-Fehler bei {ticker}: {e}")
-        return {"mentions": 0, "upvotes": 0, "posts": []}
+    except Exception:
+        return {"mentions": 0, "mentions_24h": 0, "velocity": 0,
+                "upvotes": 0, "posts": []}
     return _filter_and_pack_posts(raw, ticker)
 
 
 def fetch_reddit_buzz(ticker: str, subs: str) -> dict:
-    """PRAW wenn Credentials vorhanden, sonst öffentlicher JSON-Endpoint."""
     if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET:
         return fetch_reddit_buzz_praw(ticker, subs)
     return fetch_reddit_buzz_public(ticker, subs)
 
 
-def _format_sentiment(score: float | None) -> str:
-    """Sentiment als kompaktes Label: 📈 +0.42 / 📉 -0.31 / ➖ 0.05."""
-    if score is None:
-        return ""
-    if score > 0.15:
-        icon = "[+]"
-    elif score < -0.15:
-        icon = "[-]"
-    else:
-        icon = "[~]"
-    return f" {icon} {score:+.2f}"
+def fetch_reddit_buzz_bulk(tickers: list[str], subs: str, max_workers: int = 10) -> dict[str, dict]:
+    """Parallele Reddit-Abfragen für viele Tickers gleichzeitig."""
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_reddit_buzz, t, subs): t for t in tickers}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            try:
+                out[t] = fut.result()
+            except Exception:
+                out[t] = {"mentions": 0, "mentions_24h": 0, "velocity": 0,
+                          "upvotes": 0, "posts": []}
+    return out
 
 
-# ----------------------------------------------------------------------------
-# Report
-# ----------------------------------------------------------------------------
+# ============================================================================
+# EMPFEHLUNGS-LOGIK
+# ============================================================================
+def recommendation_label(score: int, mentions_24h: int = 0, velocity: float = 0) -> str:
+    """Klares Buy/Watch/Hold/Sell-Label basierend auf Score + optional Reddit-Buzz."""
+    # Reddit-Velocity-Boost: starker Hype kann WATCH zu BUY anheben
+    effective = score
+    if velocity >= 2.5 and mentions_24h >= 3:
+        effective += 1  # 24h-Spike boostet
+    if effective >= 3:
+        return "BUY"
+    if effective >= 1:
+        return "WATCH"
+    if effective >= -1:
+        return "HOLD"
+    if effective >= -2:
+        return "REDUCE"
+    return "SELL"
+
+
+# ============================================================================
+# CLI-Report
+# ============================================================================
 def main() -> None:
     print(f"\n=== AI Invest Radar – {datetime.now():%Y-%m-%d %H:%M} ===\n")
 
-    # --- Aktien ---
-    print(">>> US-Aktien")
-    stocks = []
-    for t in US_STOCKS:
-        try:
-            r = analyze_stock(t)
-            if r:
-                stocks.append(r)
-        except Exception as e:
-            print(f"  Fehler bei {t}: {e}")
+    print(">>> US-Aktien (Top 40 nach Marketcap)")
+    stocks, _ohlc = analyze_all_stocks()
     stocks.sort(key=lambda x: x["score"], reverse=True)
-    print(pd.DataFrame(stocks).to_string(index=False))
+    df = pd.DataFrame(stocks)[["ticker", "price", "rsi", "score", "signals"]]
+    print(df.to_string(index=False))
 
-    # --- News (Phase 2) ---
-    if MARKETAUX_API_KEY or FINNHUB_API_KEY or NEWSAPI_KEY:
-        provider = (
-            "Marketaux" if MARKETAUX_API_KEY
-            else "Finnhub" if FINNHUB_API_KEY
-            else "NewsAPI"
-        )
-        print(f"\n>>> News (letzte {NEWS_LOOKBACK_DAYS}d via {provider})")
-        for s in stocks:
-            t = s["ticker"]
-            headlines = fetch_news(t)
-            if not headlines:
-                print(f"\n  {t}: keine News")
-                continue
-            print(f"\n  {t}")
-            for h in headlines:
-                title = h["headline"][:110]
-                sent = _format_sentiment(h.get("sentiment"))
-                print(f"    [{h['date']}] {h['source']}: {title}{sent}")
-    else:
-        print("\n>>> News: keine API-Keys gesetzt (siehe .env) – wird übersprungen")
-
-    # --- Reddit-Buzz für Aktien ---
-    reddit_mode = "PRAW (auth)" if (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET) else "anonym/public"
-    print(f"\n>>> Reddit-Buzz Aktien (letzte {NEWS_LOOKBACK_DAYS}d, {reddit_mode})")
-    for s in stocks:
-        t = s["ticker"]
-        buzz = fetch_reddit_buzz(t, REDDIT_STOCK_SUBS)
-        if buzz["mentions"] == 0:
-            print(f"\n  {t}: keine Mentions")
-            continue
-        print(f"\n  {t}: {buzz['mentions']} Mentions, {buzz['upvotes']:,} Upvotes")
-        for p in buzz["posts"]:
-            title = p["title"][:100]
-            print(f"    [{p['date']} r/{p['subreddit']}] +{p['score']} ups / {p['num_comments']}c  {title}")
-
-    # --- Krypto ---
-    print("\n>>> Krypto")
-    cryptos = analyze_crypto()
+    print("\n>>> Krypto (Top 40 nach Marketcap, dynamisch)")
+    cryptos = analyze_crypto(40)
     cryptos.sort(key=lambda x: x["score"], reverse=True)
-    print(pd.DataFrame(cryptos).to_string(index=False))
+    df = pd.DataFrame(cryptos)[["ticker", "name", "price", "change_7d", "change_30d", "score", "signals"]]
+    print(df.to_string(index=False))
 
-    # --- Reddit-Buzz für Krypto ---
-    print(f"\n>>> Reddit-Buzz Krypto (letzte {NEWS_LOOKBACK_DAYS}d, {reddit_mode})")
-    for c in cryptos:
-        t = c["ticker"]
-        buzz = fetch_reddit_buzz(t, REDDIT_CRYPTO_SUBS)
-        if buzz["mentions"] == 0:
-            print(f"\n  {t}: keine Mentions")
-            continue
-        print(f"\n  {t}: {buzz['mentions']} Mentions, {buzz['upvotes']:,} Upvotes")
-        for p in buzz["posts"]:
-            title = p["title"][:100]
-            print(f"    [{p['date']} r/{p['subreddit']}] +{p['score']} ups / {p['num_comments']}c  {title}")
-
-    # --- Top-Kandidaten ---
-    print("\n=== Top 3 Long-Kandidaten ===")
+    print("\n=== Top 10 Long-Kandidaten ===")
     combined = (
-        [{"asset": s["ticker"], "score": s["score"], "signals": s["signals"]} for s in stocks]
-        + [{"asset": c["ticker"], "score": c["score"], "signals": c["signals"]} for c in cryptos]
+        [{"asset": s["ticker"], "score": s["score"], "signals": s["signals"],
+          "label": recommendation_label(s["score"])} for s in stocks]
+        + [{"asset": c["ticker"], "score": c["score"], "signals": c["signals"],
+            "label": recommendation_label(c["score"])} for c in cryptos]
     )
     combined.sort(key=lambda x: x["score"], reverse=True)
-    for r in combined[:3]:
-        print(f"  {r['asset']:6} score={r['score']:+d}  ({r['signals']})")
+    for r in combined[:10]:
+        print(f"  [{r['label']:6}] {r['asset']:8} score={r['score']:+d}  ({r['signals']})")
     print()
 
 
