@@ -9,6 +9,7 @@ fehlen, wird die News-Sektion einfach übersprungen.
 """
 
 import os
+import time
 import warnings
 from datetime import datetime, timedelta, timezone
 
@@ -249,73 +250,120 @@ def fetch_news(ticker: str) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------
-# Reddit-Buzz (Phase 2.5 – gratis via PRAW)
+# Reddit-Buzz (Phase 2.5 – default: anonymer JSON-Endpoint, kein Account nötig)
 # ----------------------------------------------------------------------------
-_reddit_client = None
-
-
-def _get_reddit():
-    """Lazy-init des Reddit-Clients (Read-only-Modus, kein Login nötig)."""
-    global _reddit_client
-    if _reddit_client is not None:
-        return _reddit_client
-    if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET):
-        return None
-    import praw  # lokaler Import, falls praw nicht installiert ist
-    _reddit_client = praw.Reddit(
-        client_id=REDDIT_CLIENT_ID,
-        client_secret=REDDIT_CLIENT_SECRET,
-        user_agent=REDDIT_USER_AGENT,
-    )
-    _reddit_client.read_only = True
-    return _reddit_client
-
-
-def fetch_reddit_buzz(ticker: str, subs: str) -> dict:
-    """Sucht Posts der letzten Woche, die den Ticker erwähnen.
-
-    Liefert mention-count, summierte Upvotes (engagement) und Top-Posts.
-    """
-    reddit = _get_reddit()
-    if reddit is None:
-        return {"mentions": 0, "upvotes": 0, "posts": []}
-
+def _filter_and_pack_posts(raw_posts: list[dict], ticker: str) -> dict:
+    """Whole-word-Ticker-Match + Aggregation zu mentions/upvotes/top-posts."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)).timestamp()
-    query = f"${ticker} OR {ticker}"
     posts = []
     total_upvotes = 0
-    try:
-        for submission in reddit.subreddit(subs).search(
-            query, sort="new", time_filter="week", limit=25
+    for p in raw_posts:
+        if p["created_utc"] < cutoff:
+            continue
+        haystack = f" {p['title'].upper()} "
+        if (
+            f" {ticker.upper()} " not in haystack
+            and f"${ticker.upper()}" not in haystack
         ):
-            if submission.created_utc < cutoff:
-                continue
-            title = (submission.title or "").strip()
-            # Naive Treffer-Validierung: Ticker muss als ganzes Wort vorkommen
-            haystack = f" {title.upper()} "
-            if f" {ticker.upper()} " not in haystack and f"${ticker.upper()}" not in haystack:
-                continue
-            posts.append({
-                "date": datetime.fromtimestamp(
-                    submission.created_utc, tz=timezone.utc
-                ).strftime("%Y-%m-%d"),
-                "subreddit": submission.subreddit.display_name,
-                "title": title,
-                "score": int(submission.score),
-                "num_comments": int(submission.num_comments),
-                "url": f"https://reddit.com{submission.permalink}",
-            })
-            total_upvotes += int(submission.score)
-    except Exception as e:
-        print(f"  Reddit-Fehler bei {ticker}: {e}")
-        return {"mentions": 0, "upvotes": 0, "posts": []}
-
-    posts.sort(key=lambda p: p["score"], reverse=True)
+            continue
+        posts.append({
+            "date": datetime.fromtimestamp(p["created_utc"], tz=timezone.utc).strftime("%Y-%m-%d"),
+            "subreddit": p["subreddit"],
+            "title": p["title"],
+            "score": p["score"],
+            "num_comments": p["num_comments"],
+            "url": f"https://reddit.com{p['permalink']}",
+        })
+        total_upvotes += p["score"]
+    posts.sort(key=lambda x: x["score"], reverse=True)
     return {
         "mentions": len(posts),
         "upvotes": total_upvotes,
         "posts": posts[:MAX_REDDIT_POSTS_PER_TICKER],
     }
+
+
+def fetch_reddit_buzz_public(ticker: str, subs: str) -> dict:
+    """Öffentlicher Reddit-JSON-Endpoint – keine Authentifizierung nötig."""
+    url = f"https://www.reddit.com/r/{subs}/search.json"
+    params = {
+        "q": f"${ticker} OR {ticker}",
+        "restrict_sr": "on",
+        "t": "week",
+        "sort": "new",
+        "limit": 25,
+    }
+    headers = {"User-Agent": REDDIT_USER_AGENT}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  Reddit-Fehler bei {ticker}: {e}")
+        return {"mentions": 0, "upvotes": 0, "posts": []}
+
+    raw = []
+    for child in r.json().get("data", {}).get("children", []):
+        d = child.get("data", {})
+        raw.append({
+            "created_utc": d.get("created_utc", 0),
+            "title": (d.get("title") or "").strip(),
+            "subreddit": d.get("subreddit", "?"),
+            "score": int(d.get("score", 0)),
+            "num_comments": int(d.get("num_comments", 0)),
+            "permalink": d.get("permalink", ""),
+        })
+    time.sleep(1)  # höflich gegenüber Reddits Rate-Limit (~60/min anonym)
+    return _filter_and_pack_posts(raw, ticker)
+
+
+_reddit_praw = None
+
+
+def _get_reddit_praw():
+    """Optionaler PRAW-Client für authentifizierte Calls (höhere Limits)."""
+    global _reddit_praw
+    if _reddit_praw is not None:
+        return _reddit_praw
+    if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET):
+        return None
+    import praw
+    _reddit_praw = praw.Reddit(
+        client_id=REDDIT_CLIENT_ID,
+        client_secret=REDDIT_CLIENT_SECRET,
+        user_agent=REDDIT_USER_AGENT,
+    )
+    _reddit_praw.read_only = True
+    return _reddit_praw
+
+
+def fetch_reddit_buzz_praw(ticker: str, subs: str) -> dict:
+    reddit = _get_reddit_praw()
+    if reddit is None:
+        return {"mentions": 0, "upvotes": 0, "posts": []}
+    raw = []
+    try:
+        for s in reddit.subreddit(subs).search(
+            f"${ticker} OR {ticker}", sort="new", time_filter="week", limit=25
+        ):
+            raw.append({
+                "created_utc": s.created_utc,
+                "title": (s.title or "").strip(),
+                "subreddit": s.subreddit.display_name,
+                "score": int(s.score),
+                "num_comments": int(s.num_comments),
+                "permalink": s.permalink,
+            })
+    except Exception as e:
+        print(f"  Reddit-PRAW-Fehler bei {ticker}: {e}")
+        return {"mentions": 0, "upvotes": 0, "posts": []}
+    return _filter_and_pack_posts(raw, ticker)
+
+
+def fetch_reddit_buzz(ticker: str, subs: str) -> dict:
+    """PRAW wenn Credentials vorhanden, sonst öffentlicher JSON-Endpoint."""
+    if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET:
+        return fetch_reddit_buzz_praw(ticker, subs)
+    return fetch_reddit_buzz_public(ticker, subs)
 
 
 def _format_sentiment(score: float | None) -> str:
@@ -373,20 +421,18 @@ def main() -> None:
         print("\n>>> News: keine API-Keys gesetzt (siehe .env) – wird übersprungen")
 
     # --- Reddit-Buzz für Aktien ---
-    if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET:
-        print(f"\n>>> Reddit-Buzz Aktien (letzte {NEWS_LOOKBACK_DAYS}d, r/{REDDIT_STOCK_SUBS.replace('+', ', r/')})")
-        for s in stocks:
-            t = s["ticker"]
-            buzz = fetch_reddit_buzz(t, REDDIT_STOCK_SUBS)
-            if buzz["mentions"] == 0:
-                print(f"\n  {t}: keine Mentions")
-                continue
-            print(f"\n  {t}: {buzz['mentions']} Mentions, {buzz['upvotes']:,} Upvotes")
-            for p in buzz["posts"]:
-                title = p["title"][:100]
-                print(f"    [{p['date']} r/{p['subreddit']}] +{p['score']} ups / {p['num_comments']}c  {title}")
-    else:
-        print("\n>>> Reddit-Buzz: keine Reddit-Credentials in .env – wird übersprungen")
+    reddit_mode = "PRAW (auth)" if (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET) else "anonym/public"
+    print(f"\n>>> Reddit-Buzz Aktien (letzte {NEWS_LOOKBACK_DAYS}d, {reddit_mode})")
+    for s in stocks:
+        t = s["ticker"]
+        buzz = fetch_reddit_buzz(t, REDDIT_STOCK_SUBS)
+        if buzz["mentions"] == 0:
+            print(f"\n  {t}: keine Mentions")
+            continue
+        print(f"\n  {t}: {buzz['mentions']} Mentions, {buzz['upvotes']:,} Upvotes")
+        for p in buzz["posts"]:
+            title = p["title"][:100]
+            print(f"    [{p['date']} r/{p['subreddit']}] +{p['score']} ups / {p['num_comments']}c  {title}")
 
     # --- Krypto ---
     print("\n>>> Krypto")
@@ -395,18 +441,17 @@ def main() -> None:
     print(pd.DataFrame(cryptos).to_string(index=False))
 
     # --- Reddit-Buzz für Krypto ---
-    if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET:
-        print(f"\n>>> Reddit-Buzz Krypto (letzte {NEWS_LOOKBACK_DAYS}d, r/{REDDIT_CRYPTO_SUBS.replace('+', ', r/')})")
-        for c in cryptos:
-            t = c["ticker"]
-            buzz = fetch_reddit_buzz(t, REDDIT_CRYPTO_SUBS)
-            if buzz["mentions"] == 0:
-                print(f"\n  {t}: keine Mentions")
-                continue
-            print(f"\n  {t}: {buzz['mentions']} Mentions, {buzz['upvotes']:,} Upvotes")
-            for p in buzz["posts"]:
-                title = p["title"][:100]
-                print(f"    [{p['date']} r/{p['subreddit']}] +{p['score']} ups / {p['num_comments']}c  {title}")
+    print(f"\n>>> Reddit-Buzz Krypto (letzte {NEWS_LOOKBACK_DAYS}d, {reddit_mode})")
+    for c in cryptos:
+        t = c["ticker"]
+        buzz = fetch_reddit_buzz(t, REDDIT_CRYPTO_SUBS)
+        if buzz["mentions"] == 0:
+            print(f"\n  {t}: keine Mentions")
+            continue
+        print(f"\n  {t}: {buzz['mentions']} Mentions, {buzz['upvotes']:,} Upvotes")
+        for p in buzz["posts"]:
+            title = p["title"][:100]
+            print(f"    [{p['date']} r/{p['subreddit']}] +{p['score']} ups / {p['num_comments']}c  {title}")
 
     # --- Top-Kandidaten ---
     print("\n=== Top 3 Long-Kandidaten ===")

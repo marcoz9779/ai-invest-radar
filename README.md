@@ -33,8 +33,9 @@ python main.py
 - Sammelt **Reddit-Buzz** (Mentions + Top-Posts der letzten 7 Tage) je Aktie und Krypto
   - Aktien: r/wallstreetbets, r/stocks, r/investing, r/StockMarket, r/options
   - Krypto: r/CryptoCurrency, r/CryptoMarkets, r/Bitcoin, r/ethereum
+  - Läuft **anonym ohne Account** via public JSON-Endpoint. Optional kann eine PRAW-Auth eingerichtet werden, falls man höhere Rate-Limits braucht.
 
-Ohne API-Keys läuft alles wie in Phase 1 — News und Reddit werden einfach übersprungen.
+Ohne API-Keys läuft alles inkl. Reddit-Buzz. Nur die News-Sektion wird ohne Marketaux/Finnhub/NewsAPI übersprungen.
 
 ## Roadmap
 
@@ -63,6 +64,6 @@ Kopiere `env.example` zu `.env` und trage ein, sobald du dich registriert hast:
 - [Marketaux](https://www.marketaux.com/) – **$19/Monat**: 1.000 calls/Tag, Sentiment inklusive
 - [Finnhub](https://finnhub.io/) – Free-Tier: 60 calls/min, News + Earnings
 - [NewsAPI](https://newsapi.org/) – Free-Tier: 100 calls/Tag
-- [Reddit-App](https://www.reddit.com/prefs/apps) – **gratis**: "script"-Typ, gibt dir `client_id` (unter dem App-Namen) und `client_secret`
+- Reddit – läuft **standardmäßig anonym, keine Anmeldung nötig**. Wer möchte, kann optional bei [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) eine "script"-App für höhere Rate-Limits anlegen.
 - [Anthropic Claude](https://console.anthropic.com/) – ~$5/Monat, smartes Re-Ranking (Phase 3+)
 - Telegram Bot Token via [@BotFather](https://t.me/BotFather)
