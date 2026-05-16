@@ -15,8 +15,11 @@ source venv/bin/activate          # macOS/Linux
 # 2. Dependencies
 pip install -r requirements.txt
 
-# 3. Erster Lauf
+# 3a. CLI-Lauf (Terminal-Report)
 python main.py
+
+# 3b. Web-Dashboard (öffnet http://localhost:8501)
+streamlit run app.py
 ```
 
 ## Was das aktuell tut (Phase 1 + 2)
@@ -43,7 +46,8 @@ Ohne API-Keys läuft alles inkl. Reddit-Buzz. Nur die News-Sektion wird ohne Mar
 |-------|--------|--------|
 | 1 | Daten + technische Indikatoren + Score | ✅ |
 | 2 | News-Sammeln (Marketaux + Finnhub + NewsAPI) | ✅ |
-| 2.5 | Reddit-Buzz (PRAW, gratis) | ✅ |
+| 2.5 | Reddit-Buzz (PRAW oder anonym) | ✅ |
+| 2.7 | Streamlit-Dashboard (lokal via `streamlit run app.py`) | ✅ |
 | 3 | Sentiment-Analyse mit FinBERT / Claude | nächste |
 | 4 | Earnings-Tracking + Surprise-Signale | offen |
 | 5 | Telegram-Bot für tägliche Alerts | offen |

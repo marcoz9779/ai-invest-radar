@@ -60,13 +60,17 @@ CRYPTOS = {
 # ----------------------------------------------------------------------------
 # Aktien-Analyse
 # ----------------------------------------------------------------------------
-def analyze_stock(ticker: str) -> dict | None:
-    """3 Monate Daten holen, RSI/MACD/SMA berechnen, Score vergeben."""
+def fetch_stock_data(ticker: str) -> pd.DataFrame | None:
+    """Holt 3 Monate OHLC-Daten für einen Ticker. Wird von CLI und Dashboard genutzt."""
     df = yf.download(ticker, period="3mo", interval="1d",
                      progress=False, auto_adjust=True)
     if df.empty or len(df) < 30:
         return None
+    return df
 
+
+def analyze_stock_df(df: pd.DataFrame, ticker: str) -> dict:
+    """Berechnet RSI/MACD/SMA + Score aus einem bestehenden OHLC-DataFrame."""
     close = df["Close"].squeeze()
     rsi = float(RSIIndicator(close).rsi().iloc[-1])
     macd_diff = float(MACD(close).macd_diff().iloc[-1])
@@ -98,6 +102,14 @@ def analyze_stock(ticker: str) -> dict | None:
         "score": score,
         "signals": ", ".join(signals),
     }
+
+
+def analyze_stock(ticker: str) -> dict | None:
+    """3 Monate Daten holen + scoren (CLI-Convenience-Wrapper)."""
+    df = fetch_stock_data(ticker)
+    if df is None:
+        return None
+    return analyze_stock_df(df, ticker)
 
 
 # ----------------------------------------------------------------------------
