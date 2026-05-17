@@ -139,8 +139,9 @@ streamlit run app.py
 | 4.5 | News-Tiefe: StockTwits + CryptoPanic + RSS-Top-Stories | ✅ |
 | 5 | Telegram-Alerts (Diff + Morning-Digest, alerts.py CLI) | ✅ |
 | 5.5 | Cloud-Scheduler (cron-job.org → GitHub Actions, 24/7) + Watcher | ✅ |
-| 6 | SQLite-Storage + History-Charts | offen |
-| 7 | Swissquote-Whitelist als Filter | offen |
+| 6 | SQLite-Storage + History-Charts + Score-Trend-Badges | ✅ |
+| 6.5 | Earnings-Surprise + Anomaly-Detection + Korrelation + Money-Flow | ✅ |
+| 7 | Swissquote-Whitelist + Watchlist-P&L-Tracking | ✅ |
 
 ## Universum
 

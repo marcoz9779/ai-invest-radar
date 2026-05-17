@@ -29,6 +29,15 @@ from storage import (
     get_stats as get_storage_stats,
     save_snapshot_batch,
 )
+from swissquote import (
+    apply_whitelist,
+    compute_watchlist_pnl,
+    load_whitelist,
+    parse_swissquote_csv,
+    record_watchlist_entry,
+    remove_watchlist_entry,
+    save_whitelist,
+)
 from main import (
     ANTHROPIC_API_KEY,
     CRYPTOPANIC_API_KEY,
@@ -401,12 +410,19 @@ def render_ticker_card(
             st.markdown(render_label_badge(label, big=True), unsafe_allow_html=True)
             if extra_metric:
                 st.caption(extra_metric)
-            # Star-Button für Watchlist
+            # Star-Button für Watchlist (mit Entry-Price-Tracking)
             is_starred = ticker in st.session_state.watchlist
             star_label = "★ in Watchlist" if is_starred else "☆ Watch"
             if st.button(star_label, key=f"star_{asset_type}_{ticker}_{key_suffix}",
                          width="stretch"):
-                st.session_state.watchlist = toggle_watchlist(ticker)
+                new_wl = toggle_watchlist(ticker)
+                st.session_state.watchlist = new_wl
+                if ticker in new_wl:
+                    # Frisch hinzugefügt → Entry tracken
+                    record_watchlist_entry(ticker, price, label)
+                else:
+                    # Entfernt → Entry weg
+                    remove_watchlist_entry(ticker)
                 st.rerun()
 
         # Fundamentaldaten-Streifen (nur für Aktien)
@@ -636,6 +652,34 @@ with st.sidebar:
     except Exception:
         pass
 
+    # Swissquote-Whitelist (Phase 7)
+    st.divider()
+    st.subheader("Swissquote-Filter")
+    current_wl = load_whitelist()
+    if current_wl:
+        st.markdown(f":green[✓ {len(current_wl)} Aktien in Whitelist aktiv]")
+        with st.expander("Whitelist anzeigen"):
+            st.code(", ".join(current_wl), language=None)
+        if st.button("Whitelist löschen", key="wl_clear"):
+            save_whitelist([])
+            st.rerun()
+    else:
+        st.caption("Keine Whitelist aktiv — alle 40 Aktien werden gezeigt.")
+    csv_file = st.file_uploader(
+        "Swissquote-CSV hochladen", type=["csv", "txt"],
+        help="Spalten-Header 'Symbol' oder 'Ticker' wird erkannt. "
+             "Filtert dann das Dashboard auf nur diese Aktien.",
+        key="wl_upload",
+    )
+    if csv_file is not None:
+        tickers = parse_swissquote_csv(csv_file)
+        if tickers:
+            save_whitelist(tickers)
+            st.success(f"{len(tickers)} Tickers in Whitelist gespeichert. Refresh in 2 Sek...")
+            st.rerun()
+        else:
+            st.error("Keine Tickers im CSV erkannt. Prüfe Spalten-Name.")
+
 
 # ============================================================================
 # DATEN LADEN
@@ -744,8 +788,12 @@ try:
 except Exception as e:
     st.warning(f"Storage-Fehler: {e}")
 
+# Whitelist anwenden (nur Aktien — Kryptos sind eh dynamisch top-40)
+whitelist = load_whitelist()
+stock_rows_filtered_by_wl = apply_whitelist(stock_rows, whitelist)
+
 # Filter
-stock_rows_f = [s for s in stock_rows
+stock_rows_f = [s for s in stock_rows_filtered_by_wl
                 if s["score"] >= min_score and s["label"] in label_filter]
 crypto_rows_f = [c for c in crypto_rows
                  if c["score"] >= min_score and c["label"] in label_filter]
@@ -962,18 +1010,50 @@ with tab_watchlist:
     else:
         wl_stocks = [s for s in stock_rows if s["ticker"] in wl]
         wl_crypto = [c for c in crypto_rows if c["ticker"] in wl]
+
+        # P&L-Übersicht (Phase 7)
+        watched_all = wl_stocks + wl_crypto
+        pnl_rows = compute_watchlist_pnl(watched_all)
+        if pnl_rows:
+            st.markdown("### Performance seit Entry")
+            total_pnl_pct = sum(p["pnl_pct"] for p in pnl_rows) / len(pnl_rows)
+            wins = sum(1 for p in pnl_rows if p["pnl_pct"] > 0)
+            losses = sum(1 for p in pnl_rows if p["pnl_pct"] < 0)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Ø Return", f"{total_pnl_pct:+.2f}%")
+            m2.metric("Gewinner", f"{wins}/{len(pnl_rows)}")
+            m3.metric("Verlierer", f"{losses}/{len(pnl_rows)}")
+            best = max(pnl_rows, key=lambda x: x["pnl_pct"])
+            m4.metric("Bester Pick", f"{best['ticker']} {best['pnl_pct']:+.1f}%")
+
+            pnl_df = pd.DataFrame([{
+                "Ticker": p["ticker"],
+                "Entry-Datum": p["entry_date"],
+                "Entry-Label": p["entry_label"],
+                "Entry-Preis": f"${p['entry_price']:,.2f}" if p["entry_price"] >= 1 else f"${p['entry_price']:.6f}",
+                "Aktuell": f"${p['price']:,.2f}" if p["price"] >= 1 else f"${p['price']:.6f}",
+                "P&L %": p["pnl_pct"],
+                "Tage": p["days_held"],
+                "Aktuelles Label": p["label"],
+            } for p in pnl_rows])
+            st.dataframe(pnl_df, width="stretch", hide_index=True,
+                         column_config={
+                             "P&L %": st.column_config.NumberColumn("P&L %", format="%+.2f"),
+                         })
+
         if wl_stocks:
-            st.markdown(f"#### Aktien ({len(wl_stocks)})")
+            st.markdown(f"#### Aktien-Details ({len(wl_stocks)})")
             for s in wl_stocks:
                 render_stock_card(s, key_suffix="wl")
         if wl_crypto:
-            st.markdown(f"#### Krypto ({len(wl_crypto)})")
+            st.markdown(f"#### Krypto-Details ({len(wl_crypto)})")
             for c in wl_crypto:
                 render_crypto_card(c, key_suffix="wl")
         st.divider()
         if st.button("Watchlist komplett leeren", type="secondary"):
             for t in list(wl):
                 toggle_watchlist(t)
+                remove_watchlist_entry(t)
             st.session_state.watchlist = []
             st.rerun()
 

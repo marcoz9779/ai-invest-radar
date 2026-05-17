@@ -13,3 +13,5 @@ watchlist.json
 last_signals.json
 last_watcher.json
 data.db
+swissquote_whitelist.json
+watchlist_entries.json
