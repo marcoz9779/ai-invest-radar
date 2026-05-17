@@ -542,25 +542,6 @@ with st.sidebar:
     st.markdown(f"**Telegram:** {telegram_status}")
     st.caption(f"Lookback: {NEWS_LOOKBACK_DAYS}d · {MAX_HEADLINES_PER_TICKER} Headlines/Ticker")
 
-    # Telegram-Aktionen
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        st.divider()
-        st.subheader("Telegram-Aktionen")
-        if st.button("📤 Morning-Digest senden", width="stretch"):
-            from main import fetch_fear_greed_crypto as _fg
-            fg_now = _fg()
-            msg = build_morning_digest(stock_rows, crypto_rows, fg_now)
-            if send_telegram(msg):
-                st.success("Digest gesendet!")
-            else:
-                st.error("Senden fehlgeschlagen.")
-        if st.button("🔔 Test-Alert senden", width="stretch"):
-            ok = send_telegram(f"*Test* via Dashboard — {datetime.now():%H:%M}")
-            if ok:
-                st.success("Test gesendet!")
-            else:
-                st.error("Senden fehlgeschlagen.")
-
 
 # ============================================================================
 # DATEN LADEN
@@ -961,7 +942,46 @@ with tab_backtest:
 
 st.divider()
 st.caption(
-    "Daten: yfinance, CoinGecko, Marketaux/Finnhub/NewsAPI, Yahoo Finance, "
-    "Google News RSS, Reddit, alternative.me Fear&Greed. "
+    "Daten: yfinance, Binance, CoinGecko, Marketaux/Finnhub/NewsAPI/StockTwits/CryptoPanic, "
+    "Yahoo Finance, Google News RSS, MarketWatch/CNBC/Reuters RSS, Reddit, alternative.me Fear&Greed. "
     f"Cache: 5-30 Min · Lookback: {NEWS_LOOKBACK_DAYS}d"
 )
+
+
+# Sidebar-Telegram-Buttons (am Ende rendern, weil Datenzugriff nötig)
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    with st.sidebar:
+        st.divider()
+        st.subheader("Telegram-Aktionen")
+        if st.button("📤 Morning-Digest senden", width="stretch", key="tg_digest"):
+            with st.spinner("Baue Digest..."):
+                msg = build_morning_digest(stock_rows, crypto_rows, fg)
+            if send_telegram(msg):
+                st.success("Digest gesendet!")
+            else:
+                st.error("Senden fehlgeschlagen.")
+        if st.button("🔔 Test-Alert senden", width="stretch", key="tg_test"):
+            ok = send_telegram(f"*Test* via Dashboard — {datetime.now():%H:%M}")
+            if ok:
+                st.success("Test gesendet!")
+            else:
+                st.error("Senden fehlgeschlagen.")
+        # Diff-Alerts manuell triggern (sendet nur NEUE STRONG-Signale)
+        if st.button("🚀 Diff-Alerts senden (nur Neue)", width="stretch", key="tg_diff"):
+            from main import load_last_signals, save_signals, format_alert_signal
+            last = load_last_signals().get("patterns", {})
+            new_signals = {}
+            sent = 0
+            for a in stock_rows + crypto_rows:
+                pattern = a.get("pattern_label")
+                if pattern:
+                    new_signals[a["ticker"]] = pattern
+                    if last.get(a["ticker"]) != pattern:
+                        if send_telegram(format_alert_signal(a, pattern, a.get("pattern_reasons", []))):
+                            sent += 1
+            save_signals({"timestamp": datetime.now().isoformat(),
+                          "patterns": new_signals})
+            if sent > 0:
+                st.success(f"{sent} neue Alert(s) gesendet.")
+            else:
+                st.info("Keine neuen STRONG-Signale.")
