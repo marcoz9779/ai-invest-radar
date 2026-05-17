@@ -1196,7 +1196,9 @@ with tab_backtest:
 
     elif not is_sql_mode and bt_selection and not bt_selection.startswith("–"):
         # Suche OHLC für gewählten Ticker (Aktien oder Krypto)
-        bt_df = stock_ohlc.get(bt_selection) or crypto_ohlc.get(bt_selection)
+        bt_df = stock_ohlc.get(bt_selection)
+        if bt_df is None:
+            bt_df = crypto_ohlc.get(bt_selection)
         if bt_df is None or len(bt_df) < 60:
             st.warning("Nicht genug OHLC-Daten für Backtest.")
         else:
