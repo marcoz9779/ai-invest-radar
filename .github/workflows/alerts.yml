@@ -1,0 +1,100 @@
+name: AI Invest Radar — Telegram-Alerts
+
+# Wird via cron-job.org getriggert (HTTP POST → repository_dispatch).
+# Manuelle Ausführung via Actions-Tab → "Run workflow" (workflow_dispatch).
+on:
+  repository_dispatch:
+    types: [morning-digest, premarket-diff, open-diff, watcher, test]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Welcher Modus?"
+        required: true
+        type: choice
+        default: "test"
+        options:
+          - test
+          - digest
+          - diff
+          - watcher
+
+jobs:
+  send-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Decide mode
+        id: mode
+        run: |
+          # Aus repository_dispatch event_type → mode mapping
+          EVT="${{ github.event.action }}"
+          MAN="${{ github.event.inputs.mode }}"
+          if [ -n "$MAN" ]; then
+            echo "mode=$MAN" >> $GITHUB_OUTPUT
+          elif [ "$EVT" = "morning-digest" ]; then
+            echo "mode=digest" >> $GITHUB_OUTPUT
+          elif [ "$EVT" = "premarket-diff" ] || [ "$EVT" = "open-diff" ]; then
+            echo "mode=diff" >> $GITHUB_OUTPUT
+          elif [ "$EVT" = "watcher" ]; then
+            echo "mode=watcher" >> $GITHUB_OUTPUT
+          elif [ "$EVT" = "test" ]; then
+            echo "mode=test" >> $GITHUB_OUTPUT
+          else
+            echo "mode=diff" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Restore state (last signals + watcher)
+        if: steps.mode.outputs.mode != 'test'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            last_signals.json
+            last_watcher.json
+          key: alerts-state-${{ github.run_id }}
+          restore-keys: |
+            alerts-state-
+
+      - name: Run alerts
+        env:
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          CRYPTOPANIC_API_KEY: ${{ secrets.CRYPTOPANIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          case "${{ steps.mode.outputs.mode }}" in
+            test)    python alerts.py --test ;;
+            digest)  python alerts.py --digest ;;
+            diff)    python alerts.py ;;
+            watcher) python alerts.py --watcher ;;
+            *)       echo "Unknown mode" && exit 1 ;;
+          esac
+
+      - name: Save state cache
+        if: always() && steps.mode.outputs.mode != 'test'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            last_signals.json
+            last_watcher.json
+          key: alerts-state-${{ github.run_id }}

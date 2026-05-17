@@ -95,8 +95,16 @@ streamlit run app.py
 - `python alerts.py --test` → Test-Nachricht
 - `python alerts.py` → Diff-Alerts (nur neue STRONG-Signale)
 - `python alerts.py --digest` → Tägliche Morning-Zusammenfassung
-- `last_signals.json` speichert vorherigen Stand (gitignored)
-- Im Dashboard: Sidebar-Buttons für Morning-Digest + Test-Alert
+- `python alerts.py --watcher` → Event-driven Live-Alerts (Volume-Spike, News-Velocity, neue STRONG-Signale)
+- `last_signals.json` + `last_watcher.json` speichern vorherigen Stand (gitignored)
+- Im Dashboard: Sidebar-Buttons für Morning-Digest + Test-Alert + Diff-Alerts
+
+**Cloud-Scheduler (Phase 5.5):**
+- GitHub Actions Workflow `.github/workflows/alerts.yml` mit `repository_dispatch`
+- cron-job.org triggert per HTTP-POST → 24/7 zuverlässig, CH-Zeit native
+- Default-Schedule: 08:00 Morning-Digest · 15:00 Pre-Market-Diff · 16:00 Open-Diff · alle 30 Min Watcher
+- State-Persistenz zwischen Runs via `actions/cache`
+- Setup-Anleitung: siehe [SETUP_SCHEDULER.md](SETUP_SCHEDULER.md)
 
 **Datenquellen — Übersicht:**
 | Daten | Provider | Kosten |
@@ -130,6 +138,7 @@ streamlit run app.py
 | 4 | Multi-Signal-Pattern (STRONG BUY/SELL) + News-Sentiment-Ratio | ✅ |
 | 4.5 | News-Tiefe: StockTwits + CryptoPanic + RSS-Top-Stories | ✅ |
 | 5 | Telegram-Alerts (Diff + Morning-Digest, alerts.py CLI) | ✅ |
+| 5.5 | Cloud-Scheduler (cron-job.org → GitHub Actions, 24/7) + Watcher | ✅ |
 | 6 | SQLite-Storage + History-Charts | offen |
 | 7 | Swissquote-Whitelist als Filter | offen |
 
