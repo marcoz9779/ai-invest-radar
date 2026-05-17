@@ -90,6 +90,135 @@ st.set_page_config(
 
 
 # ----------------------------------------------------------------------------
+# Dark-Tech-Theme — Custom CSS für Trading-Tool-Ästhetik
+# ----------------------------------------------------------------------------
+st.markdown("""
+<style>
+/* Numerics in Monospace (Preise, Scores, Volumes) */
+[data-testid="stMetricValue"], [data-testid="stMetricDelta"] {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', 'Monaco', monospace !important;
+    font-feature-settings: "tnum" 1;
+}
+
+/* Header-Branding mit Cyan-Glow */
+h1 {
+    background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+
+/* Buttons mit Tech-Look */
+button[kind="primary"] {
+    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+    border: 1px solid #06b6d4;
+    box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
+    transition: all 0.2s ease;
+}
+button[kind="primary"]:hover {
+    box-shadow: 0 0 20px rgba(6, 182, 212, 0.55);
+    transform: translateY(-1px);
+}
+
+/* Container/Cards mit subtle Glow + Hover */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: linear-gradient(180deg, rgba(19, 24, 37, 0.6) 0%, rgba(10, 14, 26, 0.4) 100%);
+    border: 1px solid rgba(99, 102, 241, 0.1) !important;
+    border-radius: 12px !important;
+    transition: all 0.2s ease;
+}
+div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+    border-color: rgba(6, 182, 212, 0.35) !important;
+    box-shadow: 0 4px 24px rgba(6, 182, 212, 0.08);
+}
+
+/* Tabs moderner */
+button[data-baseweb="tab"] {
+    font-weight: 600 !important;
+    letter-spacing: 0.02em;
+    border-radius: 8px 8px 0 0 !important;
+    padding: 0.6rem 1rem !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+    background: rgba(6, 182, 212, 0.08) !important;
+    color: #06b6d4 !important;
+}
+
+/* Expander-Header */
+[data-testid="stExpander"] summary {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #94a3b8;
+}
+[data-testid="stExpander"] summary:hover {
+    color: #06b6d4;
+}
+
+/* Dataframe-Numerics */
+.dataframe td {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+    font-feature-settings: "tnum" 1;
+}
+
+/* Code-Inline-Stil (für Tickers) */
+code {
+    background: rgba(6, 182, 212, 0.08) !important;
+    color: #06b6d4 !important;
+    padding: 0.1rem 0.4rem !important;
+    border-radius: 4px !important;
+    font-weight: 600;
+}
+
+/* Metrics: bigger numbers, monospace */
+[data-testid="stMetricValue"] {
+    font-size: 1.65rem !important;
+    font-weight: 700 !important;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f172a 0%, #0a0e1a 100%);
+    border-right: 1px solid rgba(99, 102, 241, 0.1);
+}
+
+/* Header-Markdown-Status-Boxen */
+.context-card {
+    background: linear-gradient(135deg, rgba(19, 24, 37, 0.9) 0%, rgba(10, 14, 26, 0.7) 100%);
+    border: 1px solid rgba(99, 102, 241, 0.15);
+    border-radius: 12px;
+    padding: 1rem;
+    position: relative;
+    overflow: hidden;
+}
+.context-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent, #06b6d4), transparent);
+    opacity: 0.6;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a0e1a; }
+::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.2);
+    border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
+
+/* Plotly chart background */
+.js-plotly-plot .plotly .modebar-btn path {
+    fill: #64748b !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ----------------------------------------------------------------------------
 # Cached Fetchers
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=300, show_spinner=False)
@@ -193,25 +322,27 @@ def fmt_pct(v: float | None) -> str:
 # Styling-Helpers
 # ----------------------------------------------------------------------------
 LABEL_STYLES = {
-    "STRONG BUY":  ("#15803d", "white"),  # dark-green, BIG
-    "BUY":         ("#16a34a", "white"),  # green
-    "WATCH":       ("#eab308", "black"),  # yellow
-    "HOLD":        ("#6b7280", "white"),  # gray
-    "REDUCE":      ("#f97316", "white"),  # orange
-    "SELL":        ("#dc2626", "white"),  # red
-    "STRONG SELL": ("#991b1b", "white"),  # dark-red, BIG
+    "STRONG BUY":  ("#15803d", "white", "0 0 16px rgba(34, 197, 94, 0.4)"),
+    "BUY":         ("#16a34a", "white", "0 0 10px rgba(34, 197, 94, 0.25)"),
+    "WATCH":       ("#eab308", "black", "0 0 8px rgba(234, 179, 8, 0.2)"),
+    "HOLD":        ("#475569", "white", "none"),
+    "REDUCE":      ("#f97316", "white", "0 0 8px rgba(249, 115, 22, 0.25)"),
+    "SELL":        ("#dc2626", "white", "0 0 10px rgba(239, 68, 68, 0.3)"),
+    "STRONG SELL": ("#991b1b", "white", "0 0 16px rgba(239, 68, 68, 0.45)"),
 }
 
 
 def render_label_badge(label: str, big: bool = False) -> str:
-    bg, fg = LABEL_STYLES.get(label, ("#6b7280", "white"))
-    size = "1.1rem" if big else "0.85rem"
-    pad = "0.4rem 0.9rem" if big else "0.15rem 0.55rem"
+    style = LABEL_STYLES.get(label, ("#475569", "white", "none"))
+    bg, fg, glow = style if len(style) == 3 else (style[0], style[1], "none")
+    size = "1.15rem" if big else "0.85rem"
+    pad = "0.45rem 1rem" if big else "0.18rem 0.6rem"
     return (
-        f"<span style='background:{bg}; color:{fg}; "
-        f"padding:{pad}; border-radius:8px; "
-        f"font-weight:700; font-size:{size}; "
-        f"letter-spacing:0.04em;'>{label}</span>"
+        f"<span style='background: linear-gradient(135deg, {bg} 0%, {bg}dd 100%); "
+        f"color:{fg}; padding:{pad}; border-radius:8px; "
+        f"font-weight:700; font-size:{size}; letter-spacing:0.05em; "
+        f"box-shadow:{glow}; "
+        f"font-family: \"JetBrains Mono\", \"SF Mono\", monospace;'>{label}</span>"
     )
 
 
@@ -582,13 +713,20 @@ def render_ticker_card(
 # HEADER
 # ============================================================================
 col_title, col_meta, col_refresh = st.columns([5, 3, 1])
-col_title.title("AI Invest Radar")
+with col_title:
+    st.markdown(
+        "<h1 style='margin-bottom:0;'>AI Invest Radar</h1>"
+        "<div style='color:#64748b; font-size:0.85rem; letter-spacing:0.05em; "
+        "text-transform:uppercase; margin-top:-0.3rem;'>"
+        "Multi-Signal Trading Intelligence</div>",
+        unsafe_allow_html=True,
+    )
 col_meta.markdown(
-    f"<div style='text-align:right; padding-top:1.5rem; color:#888;'>"
-    f"Letztes Update · {datetime.now():%Y-%m-%d %H:%M}</div>",
+    f"<div style='text-align:right; padding-top:1.5rem; color:#64748b; font-family: monospace;'>"
+    f"<span style='color:#06b6d4;'>●</span> LIVE · {datetime.now():%Y-%m-%d %H:%M:%S}</div>",
     unsafe_allow_html=True,
 )
-if col_refresh.button("Refresh", width="stretch", type="primary"):
+if col_refresh.button("⟳ Refresh", width="stretch", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
