@@ -94,125 +94,112 @@ st.set_page_config(
 # ----------------------------------------------------------------------------
 st.markdown("""
 <style>
-/* Numerics in Monospace (Preise, Scores, Volumes) */
-[data-testid="stMetricValue"], [data-testid="stMetricDelta"] {
-    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', 'Monaco', monospace !important;
-    font-feature-settings: "tnum" 1;
-}
+/* === Swissquote-Style: hell, sauber, Orange-Akzent === */
 
-/* Header-Branding mit Cyan-Glow */
+/* Bold Display-Typography wie Swissquote-Homepage */
 h1 {
-    background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
     font-weight: 800;
     letter-spacing: -0.02em;
+    color: #1a1a1a;
+    font-size: 2.5rem;
+}
+h2, h3 {
+    font-weight: 700;
+    color: #1a1a1a;
+    letter-spacing: -0.01em;
 }
 
-/* Buttons mit Tech-Look */
+/* Primary Buttons im Swissquote-Orange */
 button[kind="primary"] {
-    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
-    border: 1px solid #06b6d4;
-    box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
-    transition: all 0.2s ease;
+    background: #EE4A2A !important;
+    border: 1px solid #EE4A2A !important;
+    color: white !important;
+    border-radius: 28px !important;
+    font-weight: 600 !important;
+    transition: all 0.15s ease;
 }
 button[kind="primary"]:hover {
-    box-shadow: 0 0 20px rgba(6, 182, 212, 0.55);
+    background: #d73e21 !important;
+    border-color: #d73e21 !important;
     transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(238, 74, 42, 0.25);
 }
 
-/* Container/Cards mit subtle Glow + Hover */
+/* Cards: weiss, subtle Border, kein Schatten */
 div[data-testid="stVerticalBlockBorderWrapper"] {
-    background: linear-gradient(180deg, rgba(19, 24, 37, 0.6) 0%, rgba(10, 14, 26, 0.4) 100%);
-    border: 1px solid rgba(99, 102, 241, 0.1) !important;
+    background: #ffffff;
+    border: 1px solid #ececec !important;
     border-radius: 12px !important;
-    transition: all 0.2s ease;
+    transition: all 0.15s ease;
 }
 div[data-testid="stVerticalBlockBorderWrapper"]:hover {
-    border-color: rgba(6, 182, 212, 0.35) !important;
-    box-shadow: 0 4px 24px rgba(6, 182, 212, 0.08);
+    border-color: #EE4A2A !important;
+    box-shadow: 0 2px 16px rgba(238, 74, 42, 0.06);
 }
 
-/* Tabs moderner */
+/* Tabs: clean, orange Akzent für active */
 button[data-baseweb="tab"] {
     font-weight: 600 !important;
-    letter-spacing: 0.02em;
-    border-radius: 8px 8px 0 0 !important;
-    padding: 0.6rem 1rem !important;
+    border-radius: 0 !important;
+    padding: 0.7rem 1.1rem !important;
+    color: #6a6a6a !important;
 }
 button[data-baseweb="tab"][aria-selected="true"] {
-    background: rgba(6, 182, 212, 0.08) !important;
-    color: #06b6d4 !important;
+    color: #EE4A2A !important;
+    border-bottom: 2px solid #EE4A2A !important;
 }
 
-/* Expander-Header */
+/* Expander */
 [data-testid="stExpander"] summary {
-    font-size: 0.95rem;
     font-weight: 600;
-    color: #94a3b8;
+    color: #1a1a1a;
 }
 [data-testid="stExpander"] summary:hover {
-    color: #06b6d4;
+    color: #EE4A2A;
 }
 
-/* Dataframe-Numerics */
-.dataframe td {
-    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
-    font-feature-settings: "tnum" 1;
-}
-
-/* Code-Inline-Stil (für Tickers) */
+/* Code/Ticker-Inline */
 code {
-    background: rgba(6, 182, 212, 0.08) !important;
-    color: #06b6d4 !important;
-    padding: 0.1rem 0.4rem !important;
+    background: #fdf1ed !important;
+    color: #EE4A2A !important;
+    padding: 0.1rem 0.45rem !important;
     border-radius: 4px !important;
     font-weight: 600;
 }
 
-/* Metrics: bigger numbers, monospace */
+/* Metrics: bigger numbers */
 [data-testid="stMetricValue"] {
-    font-size: 1.65rem !important;
+    font-size: 1.75rem !important;
     font-weight: 700 !important;
+    color: #1a1a1a !important;
+}
+[data-testid="stMetricLabel"] {
+    color: #6a6a6a !important;
+    font-size: 0.78rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
 }
 
 /* Sidebar */
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0f172a 0%, #0a0e1a 100%);
-    border-right: 1px solid rgba(99, 102, 241, 0.1);
+    background: #fafafa;
+    border-right: 1px solid #ececec;
 }
 
-/* Header-Markdown-Status-Boxen */
-.context-card {
-    background: linear-gradient(135deg, rgba(19, 24, 37, 0.9) 0%, rgba(10, 14, 26, 0.7) 100%);
-    border: 1px solid rgba(99, 102, 241, 0.15);
-    border-radius: 12px;
-    padding: 1rem;
-    position: relative;
-    overflow: hidden;
-}
-.context-card::before {
-    content: "";
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent, #06b6d4), transparent);
-    opacity: 0.6;
+/* Slider/Filter im Orange */
+[data-testid="stSlider"] [role="slider"] {
+    background-color: #EE4A2A !important;
 }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: #0a0e1a; }
-::-webkit-scrollbar-thumb {
-    background: rgba(99, 102, 241, 0.2);
-    border-radius: 5px;
+/* Inputs */
+input, textarea, [data-testid="stTextInput"] input {
+    border-color: #d4d4d4 !important;
+    border-radius: 8px !important;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
-
-/* Plotly chart background */
-.js-plotly-plot .plotly .modebar-btn path {
-    fill: #64748b !important;
+input:focus, textarea:focus {
+    border-color: #EE4A2A !important;
+    box-shadow: 0 0 0 3px rgba(238, 74, 42, 0.1) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -333,16 +320,14 @@ LABEL_STYLES = {
 
 
 def render_label_badge(label: str, big: bool = False) -> str:
-    style = LABEL_STYLES.get(label, ("#475569", "white", "none"))
-    bg, fg, glow = style if len(style) == 3 else (style[0], style[1], "none")
-    size = "1.15rem" if big else "0.85rem"
-    pad = "0.45rem 1rem" if big else "0.18rem 0.6rem"
+    style = LABEL_STYLES.get(label, ("#6a6a6a", "white", "none"))
+    bg, fg, _glow = style if len(style) == 3 else (style[0], style[1], "none")
+    size = "1.1rem" if big else "0.82rem"
+    pad = "0.4rem 1rem" if big else "0.18rem 0.6rem"
     return (
-        f"<span style='background: linear-gradient(135deg, {bg} 0%, {bg}dd 100%); "
-        f"color:{fg}; padding:{pad}; border-radius:8px; "
-        f"font-weight:700; font-size:{size}; letter-spacing:0.05em; "
-        f"box-shadow:{glow}; "
-        f"font-family: \"JetBrains Mono\", \"SF Mono\", monospace;'>{label}</span>"
+        f"<span style='background:{bg}; color:{fg}; "
+        f"padding:{pad}; border-radius:24px; "
+        f"font-weight:700; font-size:{size}; letter-spacing:0.04em;'>{label}</span>"
     )
 
 
@@ -389,7 +374,7 @@ def render_tradingview(symbol: str, container_id: str, height: int = 400):
           "symbol": "{symbol}",
           "interval": "D",
           "timezone": "Etc/UTC",
-          "theme": "dark",
+          "theme": "light",
           "style": "1",
           "locale": "en",
           "enable_publishing": false,
@@ -626,7 +611,7 @@ def render_ticker_card(
                     ))
                     hist_fig.add_hline(y=0, line=dict(color="#888", dash="dash"))
                     hist_fig.update_layout(
-                        height=200, template="plotly_dark",
+                        height=200, template="plotly_white",
                         margin=dict(t=10, b=20, l=20, r=20),
                         yaxis_title="Score",
                     )
@@ -702,7 +687,7 @@ def render_ticker_card(
                             marker=dict(color="#3b82f6"),
                         ))
                         fig_w.update_layout(
-                            height=180, template="plotly_dark",
+                            height=180, template="plotly_white",
                             margin=dict(t=10, b=10, l=20, r=10),
                         )
                         st.plotly_chart(fig_w, width="stretch",
@@ -716,17 +701,17 @@ col_title, col_meta, col_refresh = st.columns([5, 3, 1])
 with col_title:
     st.markdown(
         "<h1 style='margin-bottom:0;'>AI Invest Radar</h1>"
-        "<div style='color:#64748b; font-size:0.85rem; letter-spacing:0.05em; "
-        "text-transform:uppercase; margin-top:-0.3rem;'>"
+        "<div style='color:#6a6a6a; font-size:0.9rem; letter-spacing:0.04em; "
+        "text-transform:uppercase; margin-top:0; font-weight:600;'>"
         "Multi-Signal Trading Intelligence</div>",
         unsafe_allow_html=True,
     )
 col_meta.markdown(
-    f"<div style='text-align:right; padding-top:1.5rem; color:#64748b; font-family: monospace;'>"
-    f"<span style='color:#06b6d4;'>●</span> LIVE · {datetime.now():%Y-%m-%d %H:%M:%S}</div>",
+    f"<div style='text-align:right; padding-top:1.6rem; color:#6a6a6a; font-size:0.85rem;'>"
+    f"<span style='color:#EE4A2A;'>●</span> LIVE · {datetime.now():%Y-%m-%d %H:%M:%S}</div>",
     unsafe_allow_html=True,
 )
-if col_refresh.button("⟳ Refresh", width="stretch", type="primary"):
+if col_refresh.button("Refresh", width="stretch", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
@@ -1047,7 +1032,7 @@ if treemap_data:
         textfont=dict(size=14, color="white"),
     )
     fig_tree.update_layout(height=380, margin=dict(t=20, b=10, l=10, r=10),
-                           template="plotly_dark")
+                           template="plotly_white")
     st.plotly_chart(fig_tree, width="stretch", config={"displayModeBar": False})
 
 
@@ -1370,7 +1355,7 @@ with tab_backtest:
                     annotation_text="Startkapital",
                 )
                 fig_ec.update_layout(
-                    height=320, template="plotly_dark",
+                    height=320, template="plotly_white",
                     margin=dict(t=20, b=20, l=20, r=20),
                     yaxis_title="Equity ($)", xaxis_title="Trading-Tag",
                 )
@@ -1422,7 +1407,7 @@ with tab_corr:
         ))
         fig_corr.update_layout(
             height=min(80 + 30 * len(corr_df), 700),
-            template="plotly_dark",
+            template="plotly_white",
             margin=dict(t=20, b=20, l=20, r=20),
         )
         st.plotly_chart(fig_corr, width="stretch", key="corr_heatmap")
@@ -1452,7 +1437,7 @@ with tab_flow:
             textposition="auto",
         ))
         fig_flow.update_layout(
-            height=400, template="plotly_dark",
+            height=400, template="plotly_white",
             margin=dict(t=20, b=20, l=20, r=20),
             xaxis_title="Money-Flow-Score (Performance + Volume × 0.3)",
             yaxis=dict(autorange="reversed"),
