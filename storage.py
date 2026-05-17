@@ -189,6 +189,76 @@ def get_recent_strong_signals(days: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def backtest_from_snapshots(ticker: str, initial_capital: float = 10000) -> dict:
+    """Backtest auf echten historischen Scores aus SQLite (statt nur Tech-Indikatoren).
+
+    Strategie: BUY wenn Score >=3 (zum ersten Mal), SELL wenn Score <=-1.
+    Liefert {trades, total_return_pct, win_rate, final_equity, days_in_db}.
+    """
+    history = get_history(ticker, days=365)
+    if len(history) < 2:
+        return {"trades": [], "total_return_pct": 0, "win_rate": 0,
+                "final_equity": initial_capital, "days_in_db": len(history)}
+
+    equity = initial_capital
+    shares = 0
+    entry_price = 0
+    entry_date = None
+    trades: list[dict] = []
+
+    for i, row in enumerate(history):
+        price = row.get("price") or 0
+        if price <= 0:
+            continue
+        score = row.get("score") or 0
+        date = row["date"]
+
+        # SELL bei Score <=-1 mit offener Position
+        if score <= -1 and shares > 0:
+            sell_value = shares * price
+            pnl_pct = (price - entry_price) / entry_price * 100
+            trades.append({
+                "entry_date": entry_date, "exit_date": date,
+                "entry_price": round(entry_price, 4),
+                "exit_price": round(price, 4),
+                "pnl_pct": round(pnl_pct, 2),
+                "pnl_usd": round(sell_value - shares * entry_price, 2),
+            })
+            equity = sell_value
+            shares = 0
+
+        # BUY bei Score >=3 ohne Position
+        elif score >= 3 and shares == 0:
+            shares = equity / price
+            entry_price = price
+            entry_date = date
+
+    # Offene Position schließen
+    if shares > 0:
+        final_price = history[-1].get("price") or entry_price
+        pnl_pct = (final_price - entry_price) / entry_price * 100
+        trades.append({
+            "entry_date": entry_date, "exit_date": "open",
+            "entry_price": round(entry_price, 4),
+            "exit_price": round(final_price, 4),
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_usd": round(shares * final_price - shares * entry_price, 2),
+        })
+        equity = shares * final_price
+
+    wins = sum(1 for t in trades if t["pnl_pct"] > 0)
+    win_rate = (wins / len(trades) * 100) if trades else 0
+    total_return = (equity / initial_capital - 1) * 100
+    return {
+        "trades": trades,
+        "n_trades": len(trades),
+        "win_rate": round(win_rate, 1),
+        "total_return_pct": round(total_return, 2),
+        "final_equity": round(equity, 2),
+        "days_in_db": len(history),
+    }
+
+
 def get_stats() -> dict:
     """Allgemeine DB-Stats für Dashboard-Footer."""
     init_db()

@@ -23,6 +23,7 @@ import streamlit.components.v1 as components
 from ta.trend import SMAIndicator
 
 from storage import (
+    backtest_from_snapshots,
     get_consecutive_score_changes,
     get_history,
     get_recent_strong_signals,
@@ -59,7 +60,10 @@ from main import (
     build_morning_digest,
     claude_sentiment_fusion,
     compute_correlation_matrix,
+    fetch_coingecko_trending,
     fetch_fear_greed_crypto,
+    fetch_options_flow,
+    fetch_wikipedia_pageviews_bulk,
     fetch_news,
     fetch_reddit_buzz_bulk,
     fetch_rss_topstories,
@@ -131,6 +135,21 @@ def cached_sectors():
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_sector_money_flow():
     return fetch_sector_money_flow()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_wiki_pageviews(tickers_tuple: tuple):
+    return fetch_wikipedia_pageviews_bulk(list(tickers_tuple))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_trending_crypto():
+    return fetch_coingecko_trending()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_options_flow(ticker: str):
+    return fetch_options_flow(ticker)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -316,6 +335,7 @@ def render_ticker_card(
     pattern_reasons: list[str] | None = None,
     earnings_surprise: dict | None = None,
     anomaly: dict | None = None,
+    wiki: dict | None = None,
 ):
     """Karte pro Ticker mit Logo, Sparkline, Label, Earnings/Insider/News-Velocity-Badges."""
     with st.container(border=True):
@@ -376,6 +396,12 @@ def render_ticker_card(
                     z = anomaly.get("return_zscore", 0)
                     arrow = "📈" if z > 0 else "📉"
                     badges.append(f":orange[{arrow} Return-Outlier z={z}]")
+            # Wikipedia-Page-View-Spike (Aufmerksamkeit)
+            if wiki and wiki.get("spike_ratio", 0) >= 1.8:
+                badges.append(
+                    f":blue[📚 Wiki-Aufmerksamkeit {wiki['spike_ratio']:.1f}x "
+                    f"({wiki['today']:,} Views)]"
+                )
             if news_sentiment and news_sentiment.get("total_scored", 0) >= 3:
                 ratio = news_sentiment.get("ratio")
                 if ratio is not None:
@@ -497,21 +523,59 @@ def render_ticker_card(
                 st.markdown("**Reddit-Buzz**")
                 posts = render_reddit_block(buzz) if buzz else []
 
-            # Claude AI-Sentiment-Fusion (wenn Key)
+            # Claude AI-Sentiment-Fusion
             if ANTHROPIC_API_KEY and (headlines or posts):
                 with st.spinner("Claude analysiert News + Reddit..."):
-                    headlines_t = tuple(tuple(sorted(h.items())) for h in headlines[:8])
-                    posts_t = tuple(tuple(sorted(p.items())) for p in posts[:5])
                     ai = cached_claude(ticker, str(len(headlines)), str(len(posts)),
                                        tuple(headlines[:8]), tuple(posts[:5]))
                 if ai:
                     score = ai.get("score", 0)
                     color = "green" if score > 0.15 else "red" if score < -0.15 else "gray"
                     st.markdown(
-                        f"**Claude AI-Sentiment:** :{color}[{ai.get('label', '?').upper()}] "
+                        f"**🤖 Claude AI-Sentiment:** :{color}[{ai.get('label', '?').upper()}] "
                         f"({score:+.2f})"
                     )
                     st.caption(ai.get("summary", ""))
+
+            # Options-Flow (Aktien) und Wiki-Daily-Series
+            if asset_type == "stock":
+                with st.expander("Options-Flow + Wiki-Aufmerksamkeit"):
+                    opt = cached_options_flow(ticker)
+                    if opt and opt.get("expiry"):
+                        col_o1, col_o2, col_o3 = st.columns(3)
+                        col_o1.metric("Call-Volume", f"{opt['total_call_volume']:,}")
+                        col_o2.metric("Put-Volume", f"{opt['total_put_volume']:,}")
+                        pcr = opt.get("put_call_ratio")
+                        col_o3.metric("Put/Call-Ratio",
+                                      f"{pcr:.2f}" if pcr is not None else "—")
+                        st.caption(f"Next expiry: {opt['expiry']}")
+                        unusual = opt.get("unusual_strikes") or []
+                        if unusual:
+                            st.markdown("**Unusual Activity:**")
+                            for u in unusual[:5]:
+                                arrow = "🟢" if u["type"] == "CALL" else "🔴"
+                                st.markdown(
+                                    f"{arrow} {u['type']} ${u['strike']:.0f} · "
+                                    f"Vol {u['volume']:,} vs OI {u['open_interest']:,} "
+                                    f"(**{u['vol_oi_ratio']}x**)"
+                                )
+                        else:
+                            st.caption("Keine unusual options activity.")
+                    if wiki and wiki.get("daily_series"):
+                        st.markdown("**Wikipedia-Page-Views (letzte 14 Tage)**")
+                        wd = pd.DataFrame(wiki["daily_series"], columns=["date", "views"])
+                        wd["date"] = pd.to_datetime(wd["date"], format="%Y%m%d")
+                        fig_w = go.Figure()
+                        fig_w.add_trace(go.Bar(
+                            x=wd["date"], y=wd["views"],
+                            marker=dict(color="#3b82f6"),
+                        ))
+                        fig_w.update_layout(
+                            height=180, template="plotly_dark",
+                            margin=dict(t=10, b=10, l=20, r=10),
+                        )
+                        st.plotly_chart(fig_w, width="stretch",
+                                        key=f"wiki_{ticker}_{key_suffix}")
 
 
 # ============================================================================
@@ -782,6 +846,15 @@ for c in crypto_rows:
         c["label"] = pattern
 
 
+# Wikipedia-Page-Views für Top-Aktien (gratis, parallel)
+top_wiki_tickers = tuple(s["ticker"] for s in
+                          sorted(stock_rows, key=lambda x: -x["score"])[:15])
+with st.spinner("Lade Wikipedia-Aufmerksamkeit..."):
+    wiki_data = cached_wiki_pageviews(top_wiki_tickers)
+for s in stock_rows:
+    s["wiki"] = wiki_data.get(s["ticker"])
+
+
 # Snapshot in SQLite speichern (Phase 6 — History/Trend-Tracking)
 try:
     save_snapshot_batch(stock_rows + crypto_rows)
@@ -937,6 +1010,7 @@ def render_stock_card(s: dict, key_suffix: str = "main"):
         pattern_reasons=s.get("pattern_reasons"),
         earnings_surprise=s.get("earnings_surprise"),
         anomaly=s.get("anomaly"),
+        wiki=s.get("wiki"),
     )
 
 
@@ -973,6 +1047,20 @@ with tab_stocks:
         render_stock_card(s, key_suffix="main")
 
 with tab_crypto:
+    # CoinGecko Trending oben anzeigen
+    trending = cached_trending_crypto()
+    if trending:
+        st.markdown("### 🔥 Trending (letzte 24h, CoinGecko)")
+        cols = st.columns(min(7, len(trending)))
+        for col, t in zip(cols, trending):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{t['ticker']}**")
+                    st.caption(t["name"][:18])
+                    if t.get("rank"):
+                        st.caption(f"#{t['rank']}")
+        st.divider()
+
     if not crypto_rows_f:
         st.info("Keine Kryptos matchen die Filter.")
     for c in crypto_rows_f:
@@ -1059,11 +1147,23 @@ with tab_watchlist:
 
 
 with tab_backtest:
-    st.subheader("Backtest · 90-Tage P&L-Simulation")
+    st.subheader("Backtest · zwei Modi")
+
+    bt_mode = st.radio(
+        "Backtest-Quelle",
+        ["Tech-Indikatoren (90d OHLC, immer verfügbar)",
+         "SQLite-Snapshot-History (echte Multi-Signal-Scores, wird mit jedem Run reicher)"],
+        horizontal=False,
+        key="bt_mode",
+    )
+    is_sql_mode = "SQLite" in bt_mode
+
     st.caption(
-        "Simulation: Ab Tag 50 wird täglich der Score berechnet. "
-        "BUY bei Score ≥ +3, SELL bei Score ≤ -3. "
-        "Startkapital $10'000. Vergleich gegen Buy-and-Hold."
+        ("Strategie: BUY bei Score ≥ +3 (aus SQLite-Verlauf), SELL bei Score ≤ -1. "
+         f"Snapshots in DB: {get_storage_stats().get('snapshots', 0)} aus "
+         f"{get_storage_stats().get('days_tracked', 0)} Tagen.")
+        if is_sql_mode else
+        "Strategie: Tech-Score ≥ +3 → BUY, ≤ -3 → SELL. Startkapital $10'000. Vergleich gegen Buy-and-Hold."
     )
 
     bt_universe = ["– Aktien –"] + [s["ticker"] for s in stock_rows] + \
@@ -1074,7 +1174,27 @@ with tab_backtest:
         index=1 if len(bt_universe) > 1 else 0,
     )
 
-    if bt_selection and not bt_selection.startswith("–"):
+    if is_sql_mode and bt_selection and not bt_selection.startswith("–"):
+        result = backtest_from_snapshots(bt_selection)
+        if result["days_in_db"] < 2:
+            st.warning(
+                f"Nur {result['days_in_db']} Tage History in der DB. "
+                "Lass das Tool ein paar Tage laufen — pro Refresh wird ein Snapshot gespeichert."
+            )
+        else:
+            m_a, m_b, m_c, m_d = st.columns(4)
+            m_a.metric("Strategie-Return", f"{result['total_return_pct']:+.2f}%")
+            m_b.metric("Trades", result["n_trades"])
+            m_c.metric("Win-Rate", f"{result['win_rate']:.1f}%")
+            m_d.metric("DB-Tage", result["days_in_db"])
+            if result["trades"]:
+                st.markdown("#### Trade-Historie (echte Multi-Signal-Scores)")
+                st.dataframe(pd.DataFrame(result["trades"]),
+                             width="stretch", hide_index=True)
+            else:
+                st.info("Keine Trade-Signale im DB-Verlauf.")
+
+    elif not is_sql_mode and bt_selection and not bt_selection.startswith("–"):
         # Suche OHLC für gewählten Ticker (Aktien oder Krypto)
         bt_df = stock_ohlc.get(bt_selection) or crypto_ohlc.get(bt_selection)
         if bt_df is None or len(bt_df) < 60:

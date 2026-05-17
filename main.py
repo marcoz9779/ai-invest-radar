@@ -730,6 +730,176 @@ def analyze_crypto(top_n: int = 40) -> tuple[list[dict], dict[str, pd.DataFrame]
 
 
 # ============================================================================
+# WIKIPEDIA PAGE-VIEWS (unterbewerteter Aufmerksamkeits-Indikator, gratis)
+# ============================================================================
+WIKI_PAGE_MAP = {
+    # Custom mappings — Wikipedia-Page-Title für jeden Ticker
+    "NVDA": "Nvidia", "MSFT": "Microsoft", "AAPL": "Apple_Inc.",
+    "AMZN": "Amazon_(company)", "GOOGL": "Alphabet_Inc.",
+    "META": "Meta_Platforms", "AVGO": "Broadcom", "TSLA": "Tesla,_Inc.",
+    "BRK-B": "Berkshire_Hathaway", "LLY": "Eli_Lilly_and_Company",
+    "JPM": "JPMorgan_Chase", "V": "Visa_Inc.", "WMT": "Walmart",
+    "XOM": "ExxonMobil", "MA": "Mastercard", "UNH": "UnitedHealth_Group",
+    "ORCL": "Oracle_Corporation", "COST": "Costco",
+    "JNJ": "Johnson_%26_Johnson", "PG": "Procter_%26_Gamble",
+    "NFLX": "Netflix", "HD": "The_Home_Depot",
+    "BAC": "Bank_of_America", "ABBV": "AbbVie",
+    "CRM": "Salesforce", "KO": "The_Coca-Cola_Company",
+    "CVX": "Chevron_Corporation", "AMD": "Advanced_Micro_Devices",
+    "MRK": "Merck_%26_Co.", "PEP": "PepsiCo", "ADBE": "Adobe_Inc.",
+    "ACN": "Accenture", "CSCO": "Cisco", "TMO": "Thermo_Fisher_Scientific",
+    "MCD": "McDonald%27s", "LIN": "Linde_plc", "IBM": "IBM",
+    "PLTR": "Palantir_Technologies", "COIN": "Coinbase", "INTC": "Intel",
+}
+
+
+def fetch_wikipedia_pageviews(page_title: str, days: int = 14) -> dict:
+    """Wikipedia-Page-Views der letzten N Tage. Kein Key, gratis.
+
+    Liefert {today, avg_baseline, spike_ratio, daily_series}.
+    """
+    today = datetime.now()
+    end_date = today.strftime("%Y%m%d")
+    start_date = (today - timedelta(days=days)).strftime("%Y%m%d")
+    url = (
+        f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
+        f"en.wikipedia.org/all-access/all-agents/{page_title}/daily/"
+        f"{start_date}/{end_date}"
+    )
+    try:
+        r = requests.get(url, timeout=10,
+                         headers={"User-Agent": "ai-invest-radar/0.1"})
+        r.raise_for_status()
+        items = r.json().get("items", [])
+    except Exception:
+        return {"today": 0, "avg_baseline": 0, "spike_ratio": 0, "daily_series": []}
+    if not items:
+        return {"today": 0, "avg_baseline": 0, "spike_ratio": 0, "daily_series": []}
+    series = [(it["timestamp"][:8], int(it["views"])) for it in items]
+    views = [v for _, v in series]
+    today_views = views[-1] if views else 0
+    baseline = sum(views[:-1]) / max(len(views) - 1, 1) if len(views) > 1 else today_views
+    spike = (today_views / baseline) if baseline > 0 else 0
+    return {
+        "today": today_views,
+        "avg_baseline": round(baseline, 1),
+        "spike_ratio": round(spike, 2),
+        "daily_series": series,
+    }
+
+
+def fetch_wikipedia_pageviews_bulk(tickers: list[str], max_workers: int = 8) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    def work(t):
+        page = WIKI_PAGE_MAP.get(t)
+        if not page:
+            return t, None
+        return t, fetch_wikipedia_pageviews(page)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(work, t) for t in tickers]
+        for fut in as_completed(futures):
+            try:
+                t, data = fut.result()
+                if data is not None:
+                    out[t] = data
+            except Exception:
+                continue
+    return out
+
+
+# ============================================================================
+# COINGECKO TRENDING (was ist heute populär)
+# ============================================================================
+def fetch_coingecko_trending() -> list[dict]:
+    """Top-7 Trending Coins der letzten 24h via CoinGecko (gratis, 1 Call)."""
+    url = "https://api.coingecko.com/api/v3/search/trending"
+    data = _coingecko_get(url, {})
+    if not data:
+        return []
+    out = []
+    for item in (data.get("coins") or [])[:7]:
+        coin = item.get("item", {})
+        out.append({
+            "id": coin.get("id"),
+            "ticker": (coin.get("symbol", "") or "").upper(),
+            "name": coin.get("name", ""),
+            "rank": coin.get("market_cap_rank"),
+            "score": coin.get("score", 0),
+        })
+    return out
+
+
+# ============================================================================
+# OPTIONS-FLOW (unusual Activity, Aktien only)
+# ============================================================================
+def fetch_options_flow(ticker: str) -> dict:
+    """Schaut auf nächsten Optionschain — unusual Volume vs Open Interest.
+
+    Liefert {total_call_volume, total_put_volume, put_call_ratio, unusual_strikes, expiry}.
+    """
+    empty = {"total_call_volume": 0, "total_put_volume": 0,
+             "put_call_ratio": None, "unusual_strikes": [], "expiry": None}
+    try:
+        t = yf.Ticker(ticker)
+        expirations = t.options
+        if not expirations:
+            return empty
+        # Nächste Expiry
+        next_exp = expirations[0]
+        chain = t.option_chain(next_exp)
+        calls = chain.calls
+        puts = chain.puts
+    except Exception:
+        return empty
+
+    total_call_vol = int(calls["volume"].fillna(0).sum()) if "volume" in calls.columns else 0
+    total_put_vol = int(puts["volume"].fillna(0).sum()) if "volume" in puts.columns else 0
+    pc_ratio = (total_put_vol / total_call_vol) if total_call_vol > 0 else None
+
+    # Unusual: volume > 2x open interest UND volume >= 100
+    unusual = []
+    for kind, df in (("CALL", calls), ("PUT", puts)):
+        if "volume" not in df.columns or "openInterest" not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            vol = row.get("volume") or 0
+            oi = row.get("openInterest") or 0
+            if vol < 100 or oi <= 0:
+                continue
+            if vol >= 2 * oi:
+                unusual.append({
+                    "type": kind,
+                    "strike": float(row["strike"]),
+                    "volume": int(vol),
+                    "open_interest": int(oi),
+                    "vol_oi_ratio": round(vol / oi, 1),
+                    "last_price": float(row.get("lastPrice") or 0),
+                })
+    unusual.sort(key=lambda x: x["vol_oi_ratio"], reverse=True)
+    return {
+        "total_call_volume": total_call_vol,
+        "total_put_volume": total_put_vol,
+        "put_call_ratio": round(pc_ratio, 2) if pc_ratio is not None else None,
+        "unusual_strikes": unusual[:5],
+        "expiry": next_exp,
+    }
+
+
+def fetch_options_flow_bulk(tickers: list[str], max_workers: int = 6) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_options_flow, t): t for t in tickers}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            try:
+                out[t] = fut.result()
+            except Exception:
+                out[t] = {"total_call_volume": 0, "total_put_volume": 0,
+                          "put_call_ratio": None, "unusual_strikes": [], "expiry": None}
+    return out
+
+
+# ============================================================================
 # FEAR & GREED INDEX (Krypto-Stimmung, alternative.me)
 # ============================================================================
 def fetch_fear_greed_crypto() -> dict | None:

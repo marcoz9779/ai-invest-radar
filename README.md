@@ -142,6 +142,8 @@ streamlit run app.py
 | 6 | SQLite-Storage + History-Charts + Score-Trend-Badges | ✅ |
 | 6.5 | Earnings-Surprise + Anomaly-Detection + Korrelation + Money-Flow | ✅ |
 | 7 | Swissquote-Whitelist + Watchlist-P&L-Tracking | ✅ |
+| 8 | Wiki-Page-Views + CoinGecko-Trending + Options-Flow + SQLite-Backtest | ✅ |
+| 8.5 | Claude AI-Sentiment-Fusion (aktiv mit Anthropic-Key) | ✅ |
 
 ## Universum
 
