@@ -435,6 +435,84 @@ def news_velocity(headlines: list[dict]) -> tuple[int, float]:
     return today_count, round(velocity, 2)
 
 
+def fetch_earnings_surprise(ticker: str, n_quarters: int = 4) -> dict:
+    """EPS Beat/Miss-Historie via Finnhub. Liefert beat_rate, avg_surprise_%, last_quarters.
+
+    Wenn FINNHUB_API_KEY fehlt → leer.
+    """
+    empty = {"beat_rate": None, "avg_surprise_pct": None, "quarters": [], "trend": None}
+    if not FINNHUB_API_KEY:
+        return empty
+    url = "https://finnhub.io/api/v1/stock/earnings"
+    params = {"symbol": ticker, "limit": n_quarters, "token": FINNHUB_API_KEY}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        items = r.json() or []
+    except Exception:
+        return empty
+    if not items:
+        return empty
+    quarters = []
+    beats = 0
+    surprise_pcts = []
+    for it in items:
+        actual = it.get("actual")
+        estimate = it.get("estimate")
+        if actual is None or estimate is None or estimate == 0:
+            continue
+        surprise_pct = (actual - estimate) / abs(estimate) * 100
+        beat = surprise_pct > 0
+        if beat:
+            beats += 1
+        surprise_pcts.append(surprise_pct)
+        quarters.append({
+            "period": it.get("period"),
+            "actual": actual,
+            "estimate": estimate,
+            "surprise_pct": round(surprise_pct, 2),
+            "beat": beat,
+        })
+    if not quarters:
+        return empty
+    beat_rate = beats / len(quarters)
+    avg_surprise = sum(surprise_pcts) / len(surprise_pcts)
+    # Trend: letzten 2 Quartale vs ältere 2 — verbessert sich's?
+    trend = None
+    if len(surprise_pcts) >= 4:
+        recent = sum(surprise_pcts[:2]) / 2
+        older = sum(surprise_pcts[2:4]) / 2
+        if recent > older + 5:
+            trend = "improving"
+        elif recent < older - 5:
+            trend = "deteriorating"
+        else:
+            trend = "stable"
+    return {
+        "beat_rate": round(beat_rate, 2),
+        "avg_surprise_pct": round(avg_surprise, 2),
+        "quarters": quarters,
+        "trend": trend,
+    }
+
+
+def fetch_earnings_surprise_bulk(tickers: list[str], max_workers: int = 6) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    if not FINNHUB_API_KEY:
+        return {t: {"beat_rate": None, "avg_surprise_pct": None, "quarters": [], "trend": None}
+                for t in tickers}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_earnings_surprise, t): t for t in tickers}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            try:
+                out[t] = fut.result()
+            except Exception:
+                out[t] = {"beat_rate": None, "avg_surprise_pct": None,
+                          "quarters": [], "trend": None}
+    return out
+
+
 def fetch_earnings_calendar(ticker: str) -> str | None:
     """Liefert das nächste Earnings-Datum (ISO-String) wenn innerhalb der nächsten 14 Tage."""
     try:
@@ -484,14 +562,15 @@ def fetch_earnings_calendar_bulk(tickers: list[str], max_workers: int = 8) -> di
 
 
 def analyze_all_stocks() -> tuple[list[dict], dict[str, pd.DataFrame]]:
-    """Bulk-Variante: scort alle US_STOCKS inkl. Earnings + Fundamentals + Insider."""
+    """Bulk-Variante: scort alle US_STOCKS inkl. Earnings + Fundamentals + Insider + Surprise + Anomaly."""
     data = fetch_stock_data_bulk(US_STOCKS)
     tickers_with_data = list(data.keys())
 
-    # Parallele Zusatz-Fetches (alle gleichzeitig)
+    # Parallele Zusatz-Fetches
     earnings = fetch_earnings_calendar_bulk(tickers_with_data)
     fundamentals = fetch_fundamentals_bulk(tickers_with_data)
     insider = fetch_insider_trades_bulk(tickers_with_data)
+    earnings_surprise = fetch_earnings_surprise_bulk(tickers_with_data)
 
     results = []
     for t in US_STOCKS:
@@ -503,6 +582,9 @@ def analyze_all_stocks() -> tuple[list[dict], dict[str, pd.DataFrame]]:
             row["insider"] = insider.get(t, {"buys": 0, "sells": 0,
                                               "net_shares": 0, "net_value": 0.0,
                                               "last_trade_date": None})
+            row["earnings_surprise"] = earnings_surprise.get(t, {})
+            row["anomaly"] = detect_anomalies(data[t], t)
+
             # Insider-Boost in Score
             ins = row["insider"]
             if ins["buys"] >= 2 and ins["net_shares"] > 0:
@@ -511,6 +593,21 @@ def analyze_all_stocks() -> tuple[list[dict], dict[str, pd.DataFrame]]:
             elif ins["sells"] >= 3 and ins["net_shares"] < 0:
                 row["score"] -= 1
                 row["signals"] += ", Insider-Verkäufe"
+
+            # Earnings-Beat-Rate-Boost
+            es = row["earnings_surprise"]
+            if es.get("beat_rate", 0) and es["beat_rate"] >= 0.75 and es.get("trend") == "improving":
+                row["score"] += 1
+                row["signals"] += f", Earnings-Beat-Rate {int(es['beat_rate']*100)}%"
+            elif es.get("beat_rate", 1) and es["beat_rate"] <= 0.25:
+                row["score"] -= 1
+                row["signals"] += f", schwache Earnings-Rate {int(es['beat_rate']*100)}%"
+
+            # Anomaly-Outlier-Highlight
+            an = row["anomaly"]
+            if an.get("is_volume_outlier") or an.get("is_return_outlier"):
+                row["signals"] += ", Anomalie erkannt"
+
             results.append(row)
         except Exception:
             continue
@@ -1441,6 +1538,116 @@ def backtest_ticker(df: pd.DataFrame, ticker: str = "", initial_capital: float =
         "final_equity": round(equity, 2),
         "equity_curve": equity_curve,
     }
+
+
+# ============================================================================
+# ANOMALY-DETECTION (Z-Score auf Volume/News-Count)
+# ============================================================================
+def detect_anomalies(df: pd.DataFrame, ticker: str = "") -> dict:
+    """Z-Score-Outlier-Detection auf Volume + Daily-Returns.
+
+    Liefert {volume_zscore, return_zscore, is_volume_outlier, is_return_outlier}.
+    """
+    out = {"volume_zscore": None, "return_zscore": None,
+           "is_volume_outlier": False, "is_return_outlier": False}
+    if df is None or len(df) < 20:
+        return out
+    try:
+        close = df["Close"].squeeze()
+        vol = df["Volume"].squeeze() if "Volume" in df.columns else None
+
+        # Daily-Return-Outlier
+        returns = close.pct_change().dropna()
+        if len(returns) >= 10:
+            mean = float(returns.mean())
+            std = float(returns.std())
+            if std > 0:
+                last_return = float(returns.iloc[-1])
+                z = (last_return - mean) / std
+                out["return_zscore"] = round(z, 2)
+                if abs(z) >= 2.5:
+                    out["is_return_outlier"] = True
+
+        # Volume-Outlier
+        if vol is not None and len(vol) >= 20 and float(vol.iloc[-1]) > 0:
+            mean_v = float(vol.tail(20).mean())
+            std_v = float(vol.tail(20).std())
+            if std_v > 0:
+                z = (float(vol.iloc[-1]) - mean_v) / std_v
+                out["volume_zscore"] = round(z, 2)
+                if z >= 2.5:
+                    out["is_volume_outlier"] = True
+    except Exception:
+        pass
+    return out
+
+
+# ============================================================================
+# KORRELATIONS-MATRIX
+# ============================================================================
+def compute_correlation_matrix(ohlc_dict: dict[str, pd.DataFrame],
+                              days: int = 30) -> pd.DataFrame:
+    """Pearson-Korrelation auf täglichen Returns für gegebene Tickers."""
+    closes = {}
+    for t, df in ohlc_dict.items():
+        if df is None or len(df) < days:
+            continue
+        try:
+            closes[t] = df["Close"].squeeze().tail(days).pct_change().dropna()
+        except Exception:
+            continue
+    if not closes:
+        return pd.DataFrame()
+    return pd.DataFrame(closes).corr().round(2)
+
+
+# ============================================================================
+# SEKTOR-MONEY-FLOW (erweitert die bestehende Sektoren-Performance)
+# ============================================================================
+def fetch_sector_money_flow() -> list[dict]:
+    """Berechnet Money-Flow-Score je Sektor aus 5d/30d-Performance + Volume.
+
+    Money-Flow positiv = Geld fließt rein (steigende Preise + steigendes Volumen).
+    """
+    tickers = list(SECTOR_ETFS.keys())
+    try:
+        df = yf.download(tickers, period="40d", interval="1d",
+                         progress=False, auto_adjust=True, group_by="ticker")
+    except Exception:
+        return []
+    out = []
+    for etf, name in SECTOR_ETFS.items():
+        try:
+            sub = df[etf] if len(tickers) > 1 else df
+            close = sub["Close"].dropna()
+            vol = sub["Volume"].dropna() if "Volume" in sub.columns else None
+            if len(close) < 30:
+                continue
+            now = float(close.iloc[-1])
+            chg_5d = (now / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else 0
+            chg_30d = (now / float(close.iloc[-30]) - 1) * 100
+
+            # Money-Flow-Score: 5d-Performance + Volume-Trend
+            vol_trend = 0
+            if vol is not None and len(vol) >= 10:
+                recent_vol = float(vol.tail(5).mean())
+                older_vol = float(vol.tail(20).head(15).mean()) if len(vol) >= 20 else 0
+                if older_vol > 0:
+                    vol_trend = (recent_vol / older_vol - 1) * 100
+
+            mf_score = chg_5d + (vol_trend * 0.3)  # Volume hat 30%-Gewicht
+
+            out.append({
+                "etf": etf, "sector": name,
+                "change_5d": round(chg_5d, 2),
+                "change_30d": round(chg_30d, 2),
+                "vol_trend_pct": round(vol_trend, 1),
+                "money_flow_score": round(mf_score, 2),
+            })
+        except Exception:
+            continue
+    out.sort(key=lambda x: x["money_flow_score"], reverse=True)
+    return out
 
 
 # ============================================================================

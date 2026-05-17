@@ -49,10 +49,12 @@ from main import (
     backtest_ticker,
     build_morning_digest,
     claude_sentiment_fusion,
+    compute_correlation_matrix,
     fetch_fear_greed_crypto,
     fetch_news,
     fetch_reddit_buzz_bulk,
     fetch_rss_topstories,
+    fetch_sector_money_flow,
     fetch_sector_performance,
     load_watchlist,
     multi_signal_pattern,
@@ -115,6 +117,18 @@ def cached_fear_greed():
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_sectors():
     return fetch_sector_performance()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_sector_money_flow():
+    return fetch_sector_money_flow()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_correlation_matrix(tickers_tuple: tuple, ohlc_pickle: dict):
+    """Korrelation auf täglichen Returns, 30 Tage."""
+    ohlc = {t: pd.DataFrame(d) for t, d in ohlc_pickle.items() if t in tickers_tuple}
+    return compute_correlation_matrix(ohlc, days=30)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -291,6 +305,8 @@ def render_ticker_card(
     key_suffix: str = "main",
     news_sentiment: dict | None = None,
     pattern_reasons: list[str] | None = None,
+    earnings_surprise: dict | None = None,
+    anomaly: dict | None = None,
 ):
     """Karte pro Ticker mit Logo, Sparkline, Label, Earnings/Insider/News-Velocity-Badges."""
     with st.container(border=True):
@@ -334,6 +350,23 @@ def render_ticker_card(
                     badges.append(f":red[📉 Score fällt {-trend} Tage in Folge]")
             except Exception:
                 pass
+            # Earnings-Surprise-Badge
+            if earnings_surprise and earnings_surprise.get("beat_rate") is not None:
+                br = earnings_surprise["beat_rate"]
+                trend = earnings_surprise.get("trend") or ""
+                if br >= 0.75:
+                    icon = "🎯" if trend != "deteriorating" else "⚠️"
+                    badges.append(f":green[{icon} Beat-Rate {int(br*100)}% ({len(earnings_surprise.get('quarters', []))}Q)]")
+                elif br <= 0.25:
+                    badges.append(f":red[💀 Beat-Rate nur {int(br*100)}%]")
+            # Anomalie-Badge
+            if anomaly:
+                if anomaly.get("is_volume_outlier"):
+                    badges.append(f":orange[🚨 Volume-Outlier z={anomaly['volume_zscore']}]")
+                if anomaly.get("is_return_outlier"):
+                    z = anomaly.get("return_zscore", 0)
+                    arrow = "📈" if z > 0 else "📉"
+                    badges.append(f":orange[{arrow} Return-Outlier z={z}]")
             if news_sentiment and news_sentiment.get("total_scored", 0) >= 3:
                 ratio = news_sentiment.get("ratio")
                 if ratio is not None:
@@ -822,12 +855,14 @@ m4.metric("Earnings <14d", earnings_soon)
 # ============================================================================
 wl_count = len([t for t in st.session_state.watchlist
                 if t in [s["ticker"] for s in stock_rows] + [c["ticker"] for c in crypto_rows]])
-tab_stocks, tab_crypto, tab_all, tab_watchlist, tab_backtest = st.tabs(
+tab_stocks, tab_crypto, tab_all, tab_watchlist, tab_backtest, tab_corr, tab_flow = st.tabs(
     [f"US-Aktien ({len(stock_rows_f)})",
      f"Krypto ({len(crypto_rows_f)})",
      "Alle Empfehlungen",
      f"★ Watchlist ({wl_count})",
-     "Backtest"]
+     "Backtest",
+     "Korrelation",
+     "Money-Flow"]
 )
 
 def render_stock_card(s: dict, key_suffix: str = "main"):
@@ -852,6 +887,8 @@ def render_stock_card(s: dict, key_suffix: str = "main"):
         key_suffix=key_suffix,
         news_sentiment=s.get("news_sentiment"),
         pattern_reasons=s.get("pattern_reasons"),
+        earnings_surprise=s.get("earnings_surprise"),
+        anomaly=s.get("anomaly"),
     )
 
 
@@ -1006,6 +1043,93 @@ with tab_backtest:
                 st.dataframe(trades_df, width="stretch", hide_index=True)
             else:
                 st.info("Keine BUY/SELL-Signale im Backtest-Zeitraum.")
+
+
+with tab_corr:
+    st.subheader("Korrelations-Matrix — tägliche Returns (30 Tage)")
+    st.caption(
+        "Wer bewegt sich zusammen? Werte zwischen -1 (gegenläufig) und +1 (gleichläufig). "
+        "Diversifikation = niedrige Korrelationen."
+    )
+    corr_choice = st.radio(
+        "Asset-Klasse",
+        ["US-Aktien", "Krypto", "Top 20 BUY/WATCH (gemischt)"],
+        horizontal=True,
+        key="corr_choice",
+    )
+    if corr_choice == "US-Aktien":
+        corr_tickers = tuple(s["ticker"] for s in stock_rows[:25])
+        ohlc_src = stock_ohlc_p
+    elif corr_choice == "Krypto":
+        corr_tickers = tuple(c["ticker"] for c in crypto_rows[:25])
+        ohlc_src = crypto_ohlc_p
+    else:
+        # Mixed: top score
+        mix_assets = sorted(stock_rows + crypto_rows,
+                            key=lambda x: -x["score"])[:20]
+        corr_tickers = tuple(a["ticker"] for a in mix_assets)
+        ohlc_src = {**stock_ohlc_p, **crypto_ohlc_p}
+
+    with st.spinner("Berechne Korrelationen..."):
+        corr_df = cached_correlation_matrix(corr_tickers, ohlc_src)
+
+    if not corr_df.empty:
+        fig_corr = go.Figure(data=go.Heatmap(
+            z=corr_df.values, x=corr_df.columns, y=corr_df.index,
+            colorscale="RdBu_r", zmin=-1, zmax=1,
+            colorbar=dict(title="ρ"),
+            hovertemplate="%{y} ↔ %{x}: <b>%{z}</b><extra></extra>",
+        ))
+        fig_corr.update_layout(
+            height=min(80 + 30 * len(corr_df), 700),
+            template="plotly_dark",
+            margin=dict(t=20, b=20, l=20, r=20),
+        )
+        st.plotly_chart(fig_corr, width="stretch", key="corr_heatmap")
+    else:
+        st.info("Keine Daten für die Korrelation verfügbar.")
+
+
+with tab_flow:
+    st.subheader("Sektor-Money-Flow — wo läuft das Geld rein?")
+    st.caption(
+        "5d-Performance + Volumen-Trend. Positive Werte = Geld fließt rein. "
+        "Folge dem Geld."
+    )
+    flow_data = cached_sector_money_flow()
+    if flow_data:
+        flow_df = pd.DataFrame(flow_data)
+        fig_flow = go.Figure(data=go.Bar(
+            x=flow_df["money_flow_score"], y=flow_df["sector"],
+            orientation="h",
+            marker=dict(
+                color=flow_df["money_flow_score"],
+                colorscale="RdYlGn", cmin=-5, cmax=5,
+                showscale=False,
+            ),
+            text=[f"{s['change_5d']:+.1f}% | Vol {s['vol_trend_pct']:+.0f}%"
+                  for s in flow_data],
+            textposition="auto",
+        ))
+        fig_flow.update_layout(
+            height=400, template="plotly_dark",
+            margin=dict(t=20, b=20, l=20, r=20),
+            xaxis_title="Money-Flow-Score (Performance + Volume × 0.3)",
+            yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(fig_flow, width="stretch", key="sector_flow")
+
+        st.dataframe(flow_df[["etf", "sector", "change_5d", "change_30d",
+                              "vol_trend_pct", "money_flow_score"]],
+                     width="stretch", hide_index=True,
+                     column_config={
+                         "etf": "ETF",
+                         "sector": "Sektor",
+                         "change_5d": st.column_config.NumberColumn("5d %", format="%+.2f"),
+                         "change_30d": st.column_config.NumberColumn("30d %", format="%+.2f"),
+                         "vol_trend_pct": st.column_config.NumberColumn("Vol-Trend %", format="%+.0f"),
+                         "money_flow_score": st.column_config.NumberColumn("Money-Flow", format="%+.2f"),
+                     })
 
 
 st.divider()
