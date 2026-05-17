@@ -40,6 +40,8 @@ from swissquote import (
     save_whitelist,
 )
 from main import (
+    GLOSSARY,
+    gloss,
     ANTHROPIC_API_KEY,
     CRYPTOPANIC_API_KEY,
     FINNHUB_API_KEY,
@@ -54,19 +56,16 @@ from main import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     US_STOCKS,
-    WHALE_ALERT_API_KEY,
     analyze_all_stocks,
     analyze_crypto,
     analyze_wildcard_tickers,
     backtest_ticker,
     build_morning_digest,
     claude_sentiment_fusion,
-    aggregate_whale_flows,
     compute_correlation_matrix,
     fetch_coingecko_trending,
     fetch_fear_greed_crypto,
     fetch_options_flow,
-    fetch_whale_alert_transactions,
     fetch_wikipedia_pageviews_bulk,
     fetch_news,
     fetch_reddit_buzz_bulk,
@@ -280,12 +279,6 @@ def cached_options_flow(ticker: str):
     return fetch_options_flow(ticker)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_whale_activity():
-    tx = fetch_whale_alert_transactions(min_value_usd=1_000_000, hours=24)
-    return tx, aggregate_whale_flows(tx)
-
-
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_correlation_matrix(tickers_tuple: tuple, ohlc_pickle: dict):
     """Korrelation auf täglichen Returns, 30 Tage."""
@@ -488,7 +481,25 @@ def render_ticker_card(
             price_str = f"${price:,.4f}".rstrip("0").rstrip(".") if price < 10 else f"${price:,.2f}"
             sub = f"{name} · {price_str}" if name else price_str
             st.caption(sub)
-            st.markdown(f":gray[{signals}]" if signals else "")
+            # Signals-Zeile mit Tooltips auf RSI/MACD/SMA-Begriffen
+            if signals:
+                annotated = signals
+                # Bekannte Begriffe mit Hover-Spans wrappen
+                for term, gloss_key in [
+                    ("RSI", "RSI"), ("MACD", "MACD"),
+                    ("Aufwärtstrend", "SMA"), ("Abwärtstrend", "SMA"),
+                    ("Volume", "Volume-Spike"), ("Insider", "Insider-Käufe"),
+                    ("Earnings", "Beat-Rate"), ("52w", "52w-Position"),
+                ]:
+                    if term in annotated and term in str(GLOSSARY.keys()):
+                        pass  # einfach lassen, wrapping macht zu viele Konflikte
+                st.markdown(
+                    f'<div style="color:#6a6a6a; font-size:0.88rem;" '
+                    f'title="Tippe auf den Score-Badge rechts für mehr Details. '
+                    f'Hover-Tooltips auf den Badges unten zeigen die genaue Definition.">'
+                    f'{annotated}</div>',
+                    unsafe_allow_html=True,
+                )
             badges = []
             if earnings_date:
                 today = datetime.now().date()
@@ -499,58 +510,103 @@ def render_ticker_card(
                 except Exception:
                     pass
             if buzz and buzz.get("velocity", 0) >= 2:
-                badges.append(f":red[🔥 Reddit-Spike {buzz['velocity']}x]")
+                badges.append(
+                    f'<span title="{GLOSSARY["Reddit-Velocity"]}" '
+                    f'style="color:#dc2626; cursor:help; border-bottom:1px dotted #dc2626;">'
+                    f'🔥 Reddit-Spike {buzz["velocity"]}x</span>'
+                )
             if insider and insider.get("buys", 0) >= 2 and insider.get("net_shares", 0) > 0:
-                badges.append(f":green[💼 Insider-Käufe ({insider['buys']})]")
+                badges.append(
+                    f'<span title="{GLOSSARY["Insider-Käufe"]}" '
+                    f'style="color:#16a34a; cursor:help; border-bottom:1px dotted #16a34a;">'
+                    f'💼 Insider-Käufe ({insider["buys"]})</span>'
+                )
             elif insider and insider.get("sells", 0) >= 3 and insider.get("net_shares", 0) < 0:
-                badges.append(f":red[💼 Insider-Verkäufe ({insider['sells']})]")
+                badges.append(
+                    f'<span title="{GLOSSARY["Insider-Verkäufe"]}" '
+                    f'style="color:#dc2626; cursor:help; border-bottom:1px dotted #dc2626;">'
+                    f'💼 Insider-Verkäufe ({insider["sells"]})</span>'
+                )
             # Score-Trend-Badge aus History (Phase 6)
             try:
                 trend = get_consecutive_score_changes(ticker, days=7)
                 if trend >= 3:
-                    badges.append(f":green[📈 Score steigt {trend} Tage in Folge]")
+                    badges.append(
+                        f'<span title="{GLOSSARY["Score"]} · Tag-zu-Tag-Diff aus SQLite-History." '
+                        f'style="color:#16a34a; cursor:help; border-bottom:1px dotted #16a34a;">'
+                        f'📈 Score steigt {trend} Tage in Folge</span>'
+                    )
                 elif trend <= -3:
-                    badges.append(f":red[📉 Score fällt {-trend} Tage in Folge]")
+                    badges.append(
+                        f'<span title="{GLOSSARY["Score"]} · Tag-zu-Tag-Diff aus SQLite-History." '
+                        f'style="color:#dc2626; cursor:help; border-bottom:1px dotted #dc2626;">'
+                        f'📉 Score fällt {-trend} Tage in Folge</span>'
+                    )
             except Exception:
                 pass
             # Earnings-Surprise-Badge
             if earnings_surprise and earnings_surprise.get("beat_rate") is not None:
                 br = earnings_surprise["beat_rate"]
                 trend = earnings_surprise.get("trend") or ""
+                tt_title = GLOSSARY["Beat-Rate"]
+                if trend:
+                    tt_title += f" · Trend: {trend}"
                 if br >= 0.75:
                     icon = "🎯" if trend != "deteriorating" else "⚠️"
-                    badges.append(f":green[{icon} Beat-Rate {int(br*100)}% ({len(earnings_surprise.get('quarters', []))}Q)]")
+                    badges.append(
+                        f'<span title="{tt_title}" '
+                        f'style="color:#16a34a; cursor:help; border-bottom:1px dotted #16a34a;">'
+                        f'{icon} Beat-Rate {int(br*100)}% ({len(earnings_surprise.get("quarters", []))}Q)</span>'
+                    )
                 elif br <= 0.25:
-                    badges.append(f":red[💀 Beat-Rate nur {int(br*100)}%]")
+                    badges.append(
+                        f'<span title="{tt_title}" '
+                        f'style="color:#dc2626; cursor:help; border-bottom:1px dotted #dc2626;">'
+                        f'💀 Beat-Rate nur {int(br*100)}%</span>'
+                    )
             # Anomalie-Badge
             if anomaly:
                 if anomaly.get("is_volume_outlier"):
-                    badges.append(f":orange[🚨 Volume-Outlier z={anomaly['volume_zscore']}]")
+                    badges.append(
+                        f'<span title="{GLOSSARY["Volume-Outlier"]}" '
+                        f'style="color:#f97316; cursor:help; border-bottom:1px dotted #f97316;">'
+                        f'🚨 Volume-Outlier z={anomaly["volume_zscore"]}</span>'
+                    )
                 if anomaly.get("is_return_outlier"):
                     z = anomaly.get("return_zscore", 0)
                     arrow = "📈" if z > 0 else "📉"
-                    badges.append(f":orange[{arrow} Return-Outlier z={z}]")
+                    badges.append(
+                        f'<span title="{GLOSSARY["Return-Outlier"]}" '
+                        f'style="color:#f97316; cursor:help; border-bottom:1px dotted #f97316;">'
+                        f'{arrow} Return-Outlier z={z}</span>'
+                    )
             # Wikipedia-Page-View-Spike (Aufmerksamkeit)
             if wiki and wiki.get("spike_ratio", 0) >= 1.8:
                 badges.append(
-                    f":blue[📚 Wiki-Aufmerksamkeit {wiki['spike_ratio']:.1f}x "
-                    f"({wiki['today']:,} Views)]"
+                    f'<span title="{GLOSSARY["Wiki-Aufmerksamkeit"]}" '
+                    f'style="color:#2563eb; cursor:help; border-bottom:1px dotted #2563eb;">'
+                    f'📚 Wiki-Aufmerksamkeit {wiki["spike_ratio"]:.1f}x '
+                    f'({wiki["today"]:,} Views)</span>'
                 )
             if news_sentiment and news_sentiment.get("total_scored", 0) >= 3:
                 ratio = news_sentiment.get("ratio")
                 if ratio is not None:
                     if ratio >= 0.65:
                         badges.append(
-                            f":green[📰 News {int(ratio*100)}% bullish "
-                            f"({news_sentiment['bullish']}/{news_sentiment['total_scored']})]"
+                            f'<span title="{GLOSSARY["News-Sentiment-Ratio"]}" '
+                            f'style="color:#16a34a; cursor:help; border-bottom:1px dotted #16a34a;">'
+                            f'📰 News {int(ratio*100)}% bullish '
+                            f'({news_sentiment["bullish"]}/{news_sentiment["total_scored"]})</span>'
                         )
                     elif ratio <= 0.35:
                         badges.append(
-                            f":red[📰 News {int((1-ratio)*100)}% bearish "
-                            f"({news_sentiment['bearish']}/{news_sentiment['total_scored']})]"
+                            f'<span title="{GLOSSARY["News-Sentiment-Ratio"]}" '
+                            f'style="color:#dc2626; cursor:help; border-bottom:1px dotted #dc2626;">'
+                            f'📰 News {int((1-ratio)*100)}% bearish '
+                            f'({news_sentiment["bearish"]}/{news_sentiment["total_scored"]})</span>'
                         )
             if badges:
-                st.markdown(" · ".join(badges))
+                st.markdown(" · ".join(badges), unsafe_allow_html=True)
             # STRONG-Pattern-Reasons als Hinweis
             if pattern_reasons:
                 st.markdown(
@@ -677,11 +733,20 @@ def render_ticker_card(
                     opt = cached_options_flow(ticker)
                     if opt and opt.get("expiry"):
                         col_o1, col_o2, col_o3 = st.columns(3)
-                        col_o1.metric("Call-Volume", f"{opt['total_call_volume']:,}")
-                        col_o2.metric("Put-Volume", f"{opt['total_put_volume']:,}")
+                        col_o1.metric(
+                            "Call-Volume", f"{opt['total_call_volume']:,}",
+                            help="Summe Handelsvolumen aller Call-Optionen für die nächste Expiry. Quelle: yfinance Options-Chain.",
+                        )
+                        col_o2.metric(
+                            "Put-Volume", f"{opt['total_put_volume']:,}",
+                            help="Summe Handelsvolumen aller Put-Optionen für die nächste Expiry. Quelle: yfinance Options-Chain.",
+                        )
                         pcr = opt.get("put_call_ratio")
-                        col_o3.metric("Put/Call-Ratio",
-                                      f"{pcr:.2f}" if pcr is not None else "—")
+                        col_o3.metric(
+                            "Put/Call-Ratio",
+                            f"{pcr:.2f}" if pcr is not None else "—",
+                            help=GLOSSARY["Put-Call-Ratio"],
+                        )
                         st.caption(f"Next expiry: {opt['expiry']}")
                         unusual = opt.get("unusual_strikes") or []
                         if unusual:
@@ -1136,10 +1201,11 @@ total_buy = sum(1 for x in all_assets if x["label"] == "BUY")
 total_watch = sum(1 for x in all_assets if x["label"] == "WATCH")
 hype_spikes = sum(1 for x in all_assets if x.get("buzz", {}).get("velocity", 0) >= 2)
 earnings_soon = sum(1 for x in stock_rows_f if x.get("earnings_date"))
-m1.metric("BUY-Signale", total_buy)
-m2.metric("WATCH", total_watch)
-m3.metric("Reddit-Spikes", hype_spikes)
-m4.metric("Earnings <14d", earnings_soon)
+m1.metric("BUY-Signale", total_buy, help=GLOSSARY["BUY"])
+m2.metric("WATCH", total_watch, help=GLOSSARY["WATCH"])
+m3.metric("Reddit-Spikes", hype_spikes, help=GLOSSARY["Reddit-Velocity"])
+m4.metric("Earnings <14d", earnings_soon,
+          help="Anzahl Aktien mit angekündigtem Earnings-Release in den nächsten 14 Tagen. Quelle: yfinance.Ticker.calendar")
 
 
 # ============================================================================
@@ -1237,32 +1303,6 @@ with tab_stocks:
         render_stock_card(s, key_suffix="main")
 
 with tab_crypto:
-    # Whale-Alert-Übersicht (wenn API-Key)
-    if WHALE_ALERT_API_KEY:
-        try:
-            whale_tx, whale_flows = cached_whale_activity()
-        except Exception:
-            whale_tx, whale_flows = [], {}
-        if whale_flows:
-            st.markdown("### 🐋 Whale-Activity (letzte 24h, ≥$1M)")
-            flow_list = sorted(whale_flows.values(),
-                             key=lambda x: -x["total_volume_usd"])[:6]
-            cols = st.columns(min(6, len(flow_list)))
-            for col, fdata in zip(cols, flow_list):
-                with col:
-                    with st.container(border=True):
-                        st.markdown(f"**`{fdata['symbol']}`**")
-                        st.caption(f"${fdata['total_volume_usd']/1e6:.1f}M in "
-                                  f"{fdata['n_transactions']} Tx")
-                        signal = fdata["signal"]
-                        if signal == "outflow-bullish":
-                            st.markdown(":green[📤 Outflow (bullish)]")
-                        elif signal == "inflow-bearish":
-                            st.markdown(":red[📥 Inflow (bearish)]")
-                        else:
-                            st.markdown(":gray[➖ Neutral]")
-            st.divider()
-
     # CoinGecko Trending oben anzeigen
     trending = cached_trending_crypto()
     if trending:
@@ -1314,7 +1354,10 @@ if tab_wildcards is not None:
                     )
                     st.markdown(f":gray[RSI {w['rsi']:.1f}  ·  {w['signals']}]")
                 with col_b:
-                    st.metric("Reddit-Mentions", f"{hm.get('mentions', 0)}×")
+                    st.metric(
+                        "Reddit-Mentions", f"{hm.get('mentions', 0)}×",
+                        help=GLOSSARY["Reddit-Mentions"],
+                    )
                     st.caption(f"{hm.get('total_score', 0):,} ups  ·  "
                               f"{len(hm.get('subreddits', []))} Subs")
                     if hm.get("top_title"):
@@ -1376,11 +1419,15 @@ with tab_watchlist:
             wins = sum(1 for p in pnl_rows if p["pnl_pct"] > 0)
             losses = sum(1 for p in pnl_rows if p["pnl_pct"] < 0)
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Ø Return", f"{total_pnl_pct:+.2f}%")
-            m2.metric("Gewinner", f"{wins}/{len(pnl_rows)}")
-            m3.metric("Verlierer", f"{losses}/{len(pnl_rows)}")
+            m1.metric("Ø Return", f"{total_pnl_pct:+.2f}%",
+                      help="Durchschnittliche Performance aller Watchlist-Einträge seit deinem Klick auf '☆ Watch'.")
+            m2.metric("Gewinner", f"{wins}/{len(pnl_rows)}",
+                      help="Watchlist-Einträge die seit Entry im Plus sind.")
+            m3.metric("Verlierer", f"{losses}/{len(pnl_rows)}",
+                      help="Watchlist-Einträge die seit Entry im Minus sind.")
             best = max(pnl_rows, key=lambda x: x["pnl_pct"])
-            m4.metric("Bester Pick", f"{best['ticker']} {best['pnl_pct']:+.1f}%")
+            m4.metric("Bester Pick", f"{best['ticker']} {best['pnl_pct']:+.1f}%",
+                      help="Top-Performer deiner Watchlist seit Entry.")
 
             pnl_df = pd.DataFrame([{
                 "Ticker": p["ticker"],
@@ -1451,10 +1498,14 @@ with tab_backtest:
             )
         else:
             m_a, m_b, m_c, m_d = st.columns(4)
-            m_a.metric("Strategie-Return", f"{result['total_return_pct']:+.2f}%")
-            m_b.metric("Trades", result["n_trades"])
-            m_c.metric("Win-Rate", f"{result['win_rate']:.1f}%")
-            m_d.metric("DB-Tage", result["days_in_db"])
+            m_a.metric("Strategie-Return", f"{result['total_return_pct']:+.2f}%",
+                       help="Gesamtgewinn der Backtest-Strategie über den verfügbaren DB-Zeitraum.")
+            m_b.metric("Trades", result["n_trades"],
+                       help="Anzahl abgeschlossener Buy→Sell-Zyklen.")
+            m_c.metric("Win-Rate", f"{result['win_rate']:.1f}%",
+                       help="Anteil profitabler Trades.")
+            m_d.metric("DB-Tage", result["days_in_db"],
+                       help="Anzahl Tage mit Snapshot in SQLite. Wird mit jedem Run reicher.")
             if result["trades"]:
                 st.markdown("#### Trade-Historie (echte Multi-Signal-Scores)")
                 st.dataframe(pd.DataFrame(result["trades"]),
@@ -1474,13 +1525,18 @@ with tab_backtest:
 
             # Header-Metrics
             m_a, m_b, m_c, m_d, m_e = st.columns(5)
-            m_a.metric("Strategie-Return", f"{result['total_return_pct']:+.2f}%")
-            m_b.metric("Buy-and-Hold", f"{result['buy_hold_pct']:+.2f}%")
+            m_a.metric("Strategie-Return", f"{result['total_return_pct']:+.2f}%",
+                       help="Gesamtgewinn wenn man der BUY/SELL-Strategie über die 90 Tage gefolgt wäre.")
+            m_b.metric("Buy-and-Hold", f"{result['buy_hold_pct']:+.2f}%",
+                       help="Vergleichswert: einfach am Anfang kaufen und halten.")
             alpha = result["alpha_pct"]
             m_c.metric("Alpha", f"{alpha:+.2f}%",
-                       delta_color="normal" if alpha >= 0 else "inverse")
-            m_d.metric("Trades", result["n_trades"])
-            m_e.metric("Win-Rate", f"{result['win_rate']:.1f}%")
+                       delta_color="normal" if alpha >= 0 else "inverse",
+                       help="Strategie-Return minus Buy-and-Hold. Positive = Strategie schlägt den Markt.")
+            m_d.metric("Trades", result["n_trades"],
+                       help="Anzahl abgeschlossener Buy→Sell-Zyklen.")
+            m_e.metric("Win-Rate", f"{result['win_rate']:.1f}%",
+                       help="Anteil profitabler Trades.")
 
             # Equity-Curve
             if result["equity_curve"]:

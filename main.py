@@ -37,12 +37,66 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "").strip()
 
 NEWS_LOOKBACK_DAYS = 7
 MAX_HEADLINES_PER_TICKER = 5  # mehr Quellen → mehr Headlines anzeigen
 MAX_REDDIT_POSTS_PER_TICKER = 5
 EARNINGS_LOOKAHEAD_DAYS = 14  # zeige Earnings die innerhalb der nächsten X Tage anstehen
+
+
+# ============================================================================
+# GLOSSARY — zentrale Definitionen + Datenquellen (für Tooltips im Dashboard)
+# ============================================================================
+GLOSSARY = {
+    "RSI": "Relative Strength Index (0-100). Momentum-Indikator. <30 = oversold (oft Kauf-Setup), >70 = overbought (Vorsicht). · Quelle: yfinance OHLC + ta.momentum.RSIIndicator (Wilder, 1978)",
+    "MACD": "Moving Average Convergence Divergence. macd_diff = MACD-Linie minus Signal-Linie. >0 bullish, <0 bearish. · Quelle: yfinance OHLC + ta.trend.MACD (Appel, 1979)",
+    "SMA": "Simple Moving Average. SMA20 = Mittelwert der letzten 20 Tages-Closes. Preis > SMA20 > SMA50 = Aufwärtstrend. · Quelle: yfinance + ta.trend.SMAIndicator",
+    "Score": "Eigener Multi-Signal-Score (-5 bis +9). Aggregiert RSI, MACD, SMA-Konfluenz, Volume-Spike, 52w-Position, Insider-Activity, Reddit-Velocity, Earnings, AI-Sentiment.",
+    "Volume-Spike": "Heutiges Handelsvolumen vs 20-Tage-Durchschnitt. >2x normales Volumen = +1 Score (signifikantes Interesse). · Quelle: yfinance/Binance OHLCV",
+    "Volume-Outlier": "Statistischer Outlier auf Volume (z-Score >= 2.5). Extreme Aktivität die nicht zum normalen Pattern passt. · Berechnung: (heute - μ20d) / σ20d",
+    "Return-Outlier": "Statistischer Outlier auf Tages-Return (z-Score >= 2.5). Extreme Tagesbewegung. · Berechnung: z-Score auf pct_change Series",
+    "Bollinger-Squeeze": "Niedrige Volatilität (enge Bollinger-Bänder) — oft Vorbote eines Breakouts.",
+    "52w-Position": "Wie weit Preis vom 52-Wochen-Hoch/Tief entfernt ist. Nahe Tief = oversold-Bonus, nahe Hoch = Risiko.",
+    "Insider-Käufe": "Käufe durch CEO/CFO/Insider in den letzten 30 Tagen. ≥2 Käufe mit positivem Net-Volumen = bullish Signal (+1 Score). · Quelle: Finnhub /stock/insider-transactions (gratis)",
+    "Insider-Verkäufe": "Verkäufe durch Insider. ≥3 Verkäufe mit negativem Net-Volumen = bearish (-1 Score). · Quelle: Finnhub",
+    "Beat-Rate": "Anteil der letzten 4 Quartale, in denen EPS-Actual > EPS-Estimate. ≥75% bei improving Trend = +1 Score. · Quelle: Finnhub /stock/earnings",
+    "Earnings-Trend": "Vergleich der 2 letzten Quartale vs ältere 2: improving, stable, deteriorating.",
+    "Reddit-Velocity": "24h-Mentions-Rate vs 7-Tage-Durchschnitt. ≥2.5x mit ≥3 Mentions = Hype-Spike, +1 Score. · Quelle: Reddit public JSON-Endpoint (anonym)",
+    "Reddit-Mentions": "Anzahl Posts mit Ticker-Erwähnung in 10 Subreddits (wallstreetbets, stocks, investing, StockMarket, options, ValueInvesting, SecurityAnalysis, dividends, pennystocks, Daytrading).",
+    "News-Sentiment-Ratio": "Anteil bullish vs bearish gestaffelter Headlines (alle Quellen). ≥70% bullish = +1, ≤30% = -1. · Quellen: Marketaux (mit AI-Sentiment), StockTwits, Yahoo, Google News, Hacker News",
+    "Wiki-Aufmerksamkeit": "Wikipedia-Page-Views heute vs 14-Tage-Ø. ≥1.8x = signifikanter Aufmerksamkeits-Spike (oft vor Earnings/News). · Quelle: Wikimedia REST API (gratis)",
+    "Money-Flow-Score": "Sektor-Performance + Volume-Trend (30% gewichtet). Positive Werte = Kapital fließt rein. · Quelle: yfinance Sektor-ETFs (XLK/XLF/XLE/...)",
+    "Fear-Greed": "Krypto-Markt-Sentiment 0-100. <25 Extreme Fear (oft Kauf-Setup), >75 Extreme Greed (Vorsicht). · Quelle: alternative.me Fear & Greed Index",
+    "Put-Call-Ratio": "Volume Put-Optionen / Volume Call-Optionen. <0.7 bullish, >1.0 bearish. · Quelle: yfinance Options-Chain (nächste Expiry)",
+    "Unusual-Options": "Options-Strikes mit Volume ≥2x Open Interest und ≥100 Volumen. Oft Insider-Wetten oder Vor-News-Positionierung. · Quelle: yfinance Options-Chain",
+    "Claude-AI-Sentiment": "Claude Haiku 4.5 liest die letzten News + Top-Reddit-Posts und gibt eine ganzheitliche Bewertung (-1 bis +1). · Quelle: Anthropic API (~$3-5/Monat)",
+    "STRONG-BUY": "Multi-Signal-Pattern: ≥3 unabhängige bullish Signale konvergieren (Tech-Score + Reddit-Spike + Insider-Käufe + News-Bullish-Ratio). Strenger Auswahlfilter.",
+    "STRONG-SELL": "Multi-Signal-Pattern: ≥3 unabhängige bearish Signale konvergieren. Symmetrisch zu STRONG-BUY.",
+    "BUY": "Score ≥ 3 → Käufer-Setup. Mehrere Indikatoren bestätigen.",
+    "WATCH": "Score 1-2 → Beobachten. Erste Signale aber noch keine starke Konvergenz.",
+    "HOLD": "Score -1 bis 0 → Neutral, kein klares Signal.",
+    "REDUCE": "Score -2 → Position reduzieren. Bearish-Signale überwiegen leicht.",
+    "SELL": "Score ≤ -3 → Exit-Setup. Mehrere Indikatoren bestätigen Bearish.",
+    "Wildcard": "Reddit-Trending Small/Mid-Cap der NICHT im Top-40-Universum ist. Erkannt durch Scan von WSB/r/stocks-hot-posts. Höhere Volatilität, höheres Risiko.",
+    "Backtest-SQLite": "Simulation auf echten historischen Multi-Signal-Scores aus der DB. Wird mit jedem Run reicher.",
+    "Backtest-Tech": "Simulation nur auf Tech-Indikatoren-Score (RSI/MACD/SMA), berechnet jedem Tag aus den 90d OHLC.",
+}
+
+
+def gloss(label: str, key: str) -> str:
+    """Wrappt ein Label in einen HTML-Span mit Hover-Tooltip aus GLOSSARY.
+
+    Nur in Streamlit-Kontext mit unsafe_allow_html=True nutzbar.
+    """
+    info = GLOSSARY.get(key, "")
+    if not info:
+        return label
+    # Quote-Escape
+    safe = info.replace('"', "&quot;").replace("'", "&#39;")
+    return (
+        f'<span title="{safe}" '
+        f'style="border-bottom:1px dotted #b0b0b0; cursor:help;">{label}</span>'
+    )
 
 # US-Sektor-ETFs für Sektor-Performance-Übersicht
 SECTOR_ETFS = {
@@ -897,94 +951,6 @@ def fetch_options_flow_bulk(tickers: list[str], max_workers: int = 6) -> dict[st
             except Exception:
                 out[t] = {"total_call_volume": 0, "total_put_volume": 0,
                           "put_call_ratio": None, "unusual_strikes": [], "expiry": None}
-    return out
-
-
-# ============================================================================
-# WHALE ALERT (Krypto-Large-Transactions, gratis Free Tier)
-# ============================================================================
-def fetch_whale_alert_transactions(min_value_usd: int = 1_000_000,
-                                    hours: int = 24) -> list[dict]:
-    """Whale Alert: Krypto-Transactions >$min_value_usd in den letzten N Stunden.
-
-    Free Tier: 50 calls/Tag, Limit auf $500k+ Transactions, max 1h Lookback.
-    Höhere Tiers brauchen WHALE_ALERT_API_KEY in .env.
-    """
-    if not WHALE_ALERT_API_KEY:
-        return []
-    start_ts = int((datetime.now() - timedelta(hours=hours)).timestamp())
-    url = "https://api.whale-alert.io/v1/transactions"
-    params = {
-        "api_key": WHALE_ALERT_API_KEY,
-        "min_value": min_value_usd,
-        "start": start_ts,
-    }
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return []
-    if not data.get("result") == "success":
-        return []
-    out = []
-    for tx in data.get("transactions", []):
-        amount_usd = tx.get("amount_usd") or 0
-        symbol = (tx.get("symbol") or "").upper()
-        out.append({
-            "timestamp": datetime.fromtimestamp(tx.get("timestamp", 0)).isoformat(),
-            "symbol": symbol,
-            "amount_usd": amount_usd,
-            "amount": tx.get("amount"),
-            "from_owner": (tx.get("from") or {}).get("owner_type", "unknown"),
-            "from_name": (tx.get("from") or {}).get("owner", ""),
-            "to_owner": (tx.get("to") or {}).get("owner_type", "unknown"),
-            "to_name": (tx.get("to") or {}).get("owner", ""),
-            "type": tx.get("transaction_type", "transfer"),
-            "hash": tx.get("hash", ""),
-        })
-    return out
-
-
-def aggregate_whale_flows(transactions: list[dict]) -> dict[str, dict]:
-    """Aggregiert Whale-Transactions je Symbol: {SYMBOL: {total_volume, n_tx, flow}}.
-
-    flow: "inflow" = mehr auf Exchanges (bearish), "outflow" = von Exchanges weg (bullish).
-    """
-    out: dict[str, dict] = {}
-    for tx in transactions:
-        sym = tx["symbol"]
-        if not sym:
-            continue
-        if sym not in out:
-            out[sym] = {
-                "symbol": sym,
-                "total_volume_usd": 0,
-                "n_transactions": 0,
-                "exchange_inflow_usd": 0,    # auf Exchange = Verkaufsabsicht
-                "exchange_outflow_usd": 0,   # von Exchange = HODL/Privacy
-                "top_tx": None,
-            }
-        amt = tx.get("amount_usd", 0)
-        out[sym]["total_volume_usd"] += amt
-        out[sym]["n_transactions"] += 1
-        # Flow-Klassifikation
-        if tx.get("to_owner") == "exchange" and tx.get("from_owner") != "exchange":
-            out[sym]["exchange_inflow_usd"] += amt
-        elif tx.get("from_owner") == "exchange" and tx.get("to_owner") != "exchange":
-            out[sym]["exchange_outflow_usd"] += amt
-        # Größte Tx merken
-        if out[sym]["top_tx"] is None or amt > out[sym]["top_tx"]["amount_usd"]:
-            out[sym]["top_tx"] = tx
-    for d in out.values():
-        net = d["exchange_outflow_usd"] - d["exchange_inflow_usd"]
-        if net > d["total_volume_usd"] * 0.3:
-            d["signal"] = "outflow-bullish"
-        elif net < -d["total_volume_usd"] * 0.3:
-            d["signal"] = "inflow-bearish"
-        else:
-            d["signal"] = "neutral"
-        d["net_flow_usd"] = net
     return out
 
 
