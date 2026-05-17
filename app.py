@@ -780,7 +780,7 @@ def render_ticker_card(
 # ============================================================================
 # HEADER
 # ============================================================================
-col_title, col_meta, col_refresh = st.columns([5, 3, 1])
+col_title, col_meta, col_tg, col_refresh = st.columns([5, 2.5, 1, 1])
 with col_title:
     st.markdown(
         "<h1 style='margin-bottom:0;'>AI Invest Radar</h1>"
@@ -794,6 +794,21 @@ col_meta.markdown(
     f"<span style='color:#EE4A2A;'>●</span> LIVE · {datetime.now():%Y-%m-%d %H:%M:%S}</div>",
     unsafe_allow_html=True,
 )
+# Telegram-Bot-Status + Quick-Test im Header
+tg_active = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+with col_tg:
+    if tg_active:
+        if st.button("📱 Telegram", width="stretch",
+                     help="Telegram-Bot ist aktiv. Klick öffnet die Action-Buttons in der Sidebar."):
+            st.toast("📱 Telegram aktiv — siehe Sidebar 'Telegram-Bot' für Digest/Test/Diff-Alerts")
+    else:
+        st.markdown(
+            "<div style='padding-top:1.5rem; text-align:center;'>"
+            "<span title='Telegram-Bot ist NICHT konfiguriert. Bot-Token + Chat-ID müssen in .env gesetzt sein.' "
+            "style='color:#dc2626; cursor:help; font-size:0.85rem;'>"
+            "📱 TG: off</span></div>",
+            unsafe_allow_html=True,
+        )
 if col_refresh.button("Refresh", width="stretch", type="primary"):
     st.cache_data.clear()
     st.rerun()
@@ -1666,26 +1681,35 @@ st.caption(
 )
 
 
-# Sidebar-Telegram-Buttons (am Ende rendern, weil Datenzugriff nötig)
+# Telegram-Quick-Actions als Expander prominent auf der Hauptseite + in Sidebar
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
     with st.sidebar:
         st.divider()
-        st.subheader("Telegram-Aktionen")
-        if st.button("📤 Morning-Digest senden", width="stretch", key="tg_digest"):
+        st.subheader(
+            "📱 Telegram-Bot",
+            help="Sendet Alerts/Digests an deinen konfigurierten Telegram-Bot. "
+                 "Bot-Token + Chat-ID werden aus .env gelesen. "
+                 "Automatische Schedules laufen via GitHub Actions + cron-job.org "
+                 "(08:00 Digest · 15:00 Pre-Market · 16:00 Open · /30min Watcher).",
+        )
+        if st.button("📤 Morning-Digest", width="stretch", key="tg_digest",
+                     help="Schickt eine vollständige Übersicht: STRONG-Picks, BUYs, Fear&Greed, Top-Mover."):
             with st.spinner("Baue Digest..."):
                 msg = build_morning_digest(stock_rows, crypto_rows, fg)
             if send_telegram(msg):
                 st.success("Digest gesendet!")
             else:
                 st.error("Senden fehlgeschlagen.")
-        if st.button("🔔 Test-Alert senden", width="stretch", key="tg_test"):
+        if st.button("🔔 Test-Alert", width="stretch", key="tg_test",
+                     help="Schickt eine kurze Test-Nachricht — gut um die Verbindung zu prüfen."):
             ok = send_telegram(f"*Test* via Dashboard — {datetime.now():%H:%M}")
             if ok:
                 st.success("Test gesendet!")
             else:
                 st.error("Senden fehlgeschlagen.")
-        # Diff-Alerts manuell triggern (sendet nur NEUE STRONG-Signale)
-        if st.button("🚀 Diff-Alerts senden (nur Neue)", width="stretch", key="tg_diff"):
+        if st.button("🚀 Diff-Alerts (nur Neue)", width="stretch", key="tg_diff",
+                     help="Sendet nur Alerts für NEUE STRONG BUY/SELL-Signale (Diff zu last_signals.json). "
+                          "Wird auch automatisch über den GitHub-Actions-Watcher alle 30 Min ausgeführt."):
             from main import load_last_signals, save_signals, format_alert_signal
             last = load_last_signals().get("patterns", {})
             new_signals = {}
@@ -1697,6 +1721,16 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
                     if last.get(a["ticker"]) != pattern:
                         if send_telegram(format_alert_signal(a, pattern, a.get("pattern_reasons", []))):
                             sent += 1
+            save_signals({"timestamp": datetime.now().isoformat(),
+                          "patterns": new_signals})
+            if sent > 0:
+                st.success(f"{sent} neue Alert(s) gesendet.")
+            else:
+                st.info("Keine neuen STRONG-Signale.")
+        st.caption(
+            f"Chat-ID: `{TELEGRAM_CHAT_ID[:6]}…`  ·  "
+            f"Auto-Cron: cron-job.org"
+        )
             save_signals({"timestamp": datetime.now().isoformat(),
                           "patterns": new_signals})
             if sent > 0:
