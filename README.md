@@ -144,6 +144,8 @@ streamlit run app.py
 | 7 | Swissquote-Whitelist + Watchlist-P&L-Tracking | ✅ |
 | 8 | Wiki-Page-Views + CoinGecko-Trending + Options-Flow + SQLite-Backtest | ✅ |
 | 8.5 | Claude AI-Sentiment-Fusion (aktiv mit Anthropic-Key) | ✅ |
+| 9 | Reddit-Trending-Discovery → Wildcards-Tab (Small-Caps) | ✅ |
+| 9.5 | Hacker News + Whale Alert (Krypto-Inflows/Outflows) | ✅ |
 
 ## Universum
 

@@ -54,15 +54,19 @@ from main import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     US_STOCKS,
+    WHALE_ALERT_API_KEY,
     analyze_all_stocks,
     analyze_crypto,
+    analyze_wildcard_tickers,
     backtest_ticker,
     build_morning_digest,
     claude_sentiment_fusion,
+    aggregate_whale_flows,
     compute_correlation_matrix,
     fetch_coingecko_trending,
     fetch_fear_greed_crypto,
     fetch_options_flow,
+    fetch_whale_alert_transactions,
     fetch_wikipedia_pageviews_bulk,
     fetch_news,
     fetch_reddit_buzz_bulk,
@@ -222,6 +226,14 @@ def cached_crypto():
     return rows, ohlc_pickle
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_wildcards(max_tickers: int = 12):
+    """Reddit-discovered small-caps — TTL 30 Min weil Discovery teurer ist."""
+    rows, ohlc = analyze_wildcard_tickers(max_tickers=max_tickers)
+    ohlc_pickle = {t: df.to_dict() for t, df in ohlc.items()}
+    return rows, ohlc_pickle
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_news(ticker: str, name: str | None = None, asset_type: str = "stock"):
     rss_pool = cached_rss_topstories()
@@ -266,6 +278,12 @@ def cached_trending_crypto():
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_options_flow(ticker: str):
     return fetch_options_flow(ticker)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_whale_activity():
+    tx = fetch_whale_alert_transactions(min_value_usd=1_000_000, hours=24)
+    return tx, aggregate_whale_flows(tx)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -876,6 +894,18 @@ with st.spinner("Lade Aktien-Daten (Bulk + Earnings)..."):
 with st.spinner("Lade Top-40 Kryptos (OHLC + Indikatoren)..."):
     crypto_rows, crypto_ohlc_p = cached_crypto()
 
+# Wildcards (Reddit-Trending Small-Caps, optional via Sidebar)
+load_wildcards = st.sidebar.checkbox(
+    "🎲 Wildcards (Reddit-Trending)", value=True,
+    help="Discovered Small-Caps und Trending-Tickers, die NICHT im Top-40-Universum sind. "
+         "Höheres Risiko, aber potenzieller Edge wenn die WSB-Crowd früh dran ist.",
+)
+wildcard_rows: list[dict] = []
+wildcard_ohlc_p: dict = {}
+if load_wildcards:
+    with st.spinner("Scanne Reddit nach trending Small-Caps..."):
+        wildcard_rows, wildcard_ohlc_p = cached_wildcards(max_tickers=12)
+
 # OHLC zurück zu DataFrames
 stock_ohlc: dict[str, pd.DataFrame] = {}
 for t, dct in stock_ohlc_p.items():
@@ -887,6 +917,12 @@ crypto_ohlc: dict[str, pd.DataFrame] = {}
 for t, dct in crypto_ohlc_p.items():
     try:
         crypto_ohlc[t] = pd.DataFrame(dct)
+    except Exception:
+        pass
+wildcard_ohlc: dict[str, pd.DataFrame] = {}
+for t, dct in wildcard_ohlc_p.items():
+    try:
+        wildcard_ohlc[t] = pd.DataFrame(dct)
     except Exception:
         pass
 
@@ -967,6 +1003,18 @@ for c in crypto_rows:
     c["pattern_reasons"] = reasons
     if pattern:
         c["label"] = pattern
+
+# Wildcards aufbereiten (einfacher Pfad — keine Reddit/News-Fetches je Ticker,
+# da Discovery-Daten reichen und 12+ extra News-Calls den Page-Load blasen)
+for w in wildcard_rows:
+    w["type"] = "stock"
+    w["buzz"] = {"mentions": 0, "mentions_24h": 0, "velocity": 0}
+    w["news_sentiment"] = {}
+    w["label"] = recommendation_label(
+        w["score"], 0, 0, has_earnings_soon=bool(w.get("earnings_date")),
+    )
+    w["pattern_label"] = None
+    w["pattern_reasons"] = []
 
 
 # Wikipedia-Page-Views für Top-Aktien (gratis, parallel)
@@ -1099,19 +1147,38 @@ m4.metric("Earnings <14d", earnings_soon)
 # ============================================================================
 wl_count = len([t for t in st.session_state.watchlist
                 if t in [s["ticker"] for s in stock_rows] + [c["ticker"] for c in crypto_rows]])
-tab_stocks, tab_crypto, tab_all, tab_watchlist, tab_backtest, tab_corr, tab_flow = st.tabs(
-    [f"US-Aktien ({len(stock_rows_f)})",
-     f"Krypto ({len(crypto_rows_f)})",
-     "Alle Empfehlungen",
-     f"★ Watchlist ({wl_count})",
-     "Backtest",
-     "Korrelation",
-     "Money-Flow"]
-)
+tabs_config = [
+    f"US-Aktien ({len(stock_rows_f)})",
+    f"Krypto ({len(crypto_rows_f)})",
+]
+if wildcard_rows:
+    tabs_config.append(f"🎲 Wildcards ({len(wildcard_rows)})")
+tabs_config += [
+    "Alle Empfehlungen",
+    f"★ Watchlist ({wl_count})",
+    "Backtest",
+    "Korrelation",
+    "Money-Flow",
+]
+all_tabs = st.tabs(tabs_config)
+tab_idx = 0
+tab_stocks = all_tabs[tab_idx]; tab_idx += 1
+tab_crypto = all_tabs[tab_idx]; tab_idx += 1
+if wildcard_rows:
+    tab_wildcards = all_tabs[tab_idx]; tab_idx += 1
+else:
+    tab_wildcards = None
+tab_all = all_tabs[tab_idx]; tab_idx += 1
+tab_watchlist = all_tabs[tab_idx]; tab_idx += 1
+tab_backtest = all_tabs[tab_idx]; tab_idx += 1
+tab_corr = all_tabs[tab_idx]; tab_idx += 1
+tab_flow = all_tabs[tab_idx]; tab_idx += 1
 
 def render_stock_card(s: dict, key_suffix: str = "main"):
     """Wrapper für eine Aktie."""
     ohlc = stock_ohlc.get(s["ticker"])
+    if ohlc is None:
+        ohlc = wildcard_ohlc.get(s["ticker"])
     sparkline = ohlc["Close"].squeeze() if ohlc is not None else None
     render_ticker_card(
         label=s["label"],
@@ -1170,6 +1237,32 @@ with tab_stocks:
         render_stock_card(s, key_suffix="main")
 
 with tab_crypto:
+    # Whale-Alert-Übersicht (wenn API-Key)
+    if WHALE_ALERT_API_KEY:
+        try:
+            whale_tx, whale_flows = cached_whale_activity()
+        except Exception:
+            whale_tx, whale_flows = [], {}
+        if whale_flows:
+            st.markdown("### 🐋 Whale-Activity (letzte 24h, ≥$1M)")
+            flow_list = sorted(whale_flows.values(),
+                             key=lambda x: -x["total_volume_usd"])[:6]
+            cols = st.columns(min(6, len(flow_list)))
+            for col, fdata in zip(cols, flow_list):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(f"**`{fdata['symbol']}`**")
+                        st.caption(f"${fdata['total_volume_usd']/1e6:.1f}M in "
+                                  f"{fdata['n_transactions']} Tx")
+                        signal = fdata["signal"]
+                        if signal == "outflow-bullish":
+                            st.markdown(":green[📤 Outflow (bullish)]")
+                        elif signal == "inflow-bearish":
+                            st.markdown(":red[📥 Inflow (bearish)]")
+                        else:
+                            st.markdown(":gray[➖ Neutral]")
+            st.divider()
+
     # CoinGecko Trending oben anzeigen
     trending = cached_trending_crypto()
     if trending:
@@ -1188,6 +1281,58 @@ with tab_crypto:
         st.info("Keine Kryptos matchen die Filter.")
     for c in crypto_rows_f:
         render_crypto_card(c, key_suffix="main")
+
+if tab_wildcards is not None:
+    with tab_wildcards:
+        st.subheader("🎲 Wildcards — Reddit-Trending Small-Caps")
+        st.caption(
+            "Diese Tickers wurden in WSB/r/stocks/r/investing diskutiert "
+            "und sind NICHT im Top-40-Universum. Höheres Risiko, potenzieller Edge "
+            "wenn die Crowd früh dran ist. **Nicht für jeden geeignet.**"
+        )
+        st.warning(
+            "⚠️ **Hype-Risk:** Small-Caps haben höhere Vola. Position-Size klein halten. "
+            "Pro Ticker max. 1-2% deines Portfolios."
+        )
+
+        wildcard_sorted = sorted(wildcard_rows, key=lambda x: -x["score"])
+        for w in wildcard_sorted:
+            hm = w.get("hype_metadata", {})
+            mcap = w.get("market_cap")
+            mcap_str = (
+                f"${mcap/1e12:.2f}T" if mcap and mcap >= 1e12 else
+                f"${mcap/1e9:.1f}B" if mcap and mcap >= 1e9 else
+                f"${mcap/1e6:.0f}M" if mcap else "unbekannt"
+            )
+            with st.container(border=True):
+                col_a, col_b, col_c = st.columns([3, 2, 1.5])
+                with col_a:
+                    st.markdown(f"### `{w['ticker']}` · {w.get('name', '')[:50]}")
+                    st.caption(
+                        f"💰 ${w['price']:,.2f}  ·  📊 MCap {mcap_str}  ·  "
+                        f"Sektor: {w.get('sector_yf') or w.get('sector_yf', '—')}"
+                    )
+                    st.markdown(f":gray[RSI {w['rsi']:.1f}  ·  {w['signals']}]")
+                with col_b:
+                    st.metric("Reddit-Mentions", f"{hm.get('mentions', 0)}×")
+                    st.caption(f"{hm.get('total_score', 0):,} ups  ·  "
+                              f"{len(hm.get('subreddits', []))} Subs")
+                    if hm.get("top_title"):
+                        st.caption(f"_»{hm['top_title']}«_")
+                with col_c:
+                    st.markdown(render_label_badge(w["label"], big=True),
+                                unsafe_allow_html=True)
+                    st.caption(f"Score {w['score']:+d}")
+
+                # Sparkline + Expander für Details
+                ohlc_w = wildcard_ohlc.get(w["ticker"])
+                if ohlc_w is not None and len(ohlc_w) > 1:
+                    with st.expander("Chart + Details"):
+                        render_tradingview(
+                            tradingview_symbol(w["ticker"], "stock"),
+                            f"tv_wc_{w['ticker'].replace('-', '_')}",
+                            height=400,
+                        )
 
 with tab_all:
     st.subheader("Alle Assets sortiert nach Empfehlung")

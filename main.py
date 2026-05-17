@@ -37,6 +37,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "").strip()
 
 NEWS_LOOKBACK_DAYS = 7
 MAX_HEADLINES_PER_TICKER = 5  # mehr Quellen → mehr Headlines anzeigen
@@ -900,6 +901,94 @@ def fetch_options_flow_bulk(tickers: list[str], max_workers: int = 6) -> dict[st
 
 
 # ============================================================================
+# WHALE ALERT (Krypto-Large-Transactions, gratis Free Tier)
+# ============================================================================
+def fetch_whale_alert_transactions(min_value_usd: int = 1_000_000,
+                                    hours: int = 24) -> list[dict]:
+    """Whale Alert: Krypto-Transactions >$min_value_usd in den letzten N Stunden.
+
+    Free Tier: 50 calls/Tag, Limit auf $500k+ Transactions, max 1h Lookback.
+    Höhere Tiers brauchen WHALE_ALERT_API_KEY in .env.
+    """
+    if not WHALE_ALERT_API_KEY:
+        return []
+    start_ts = int((datetime.now() - timedelta(hours=hours)).timestamp())
+    url = "https://api.whale-alert.io/v1/transactions"
+    params = {
+        "api_key": WHALE_ALERT_API_KEY,
+        "min_value": min_value_usd,
+        "start": start_ts,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+    if not data.get("result") == "success":
+        return []
+    out = []
+    for tx in data.get("transactions", []):
+        amount_usd = tx.get("amount_usd") or 0
+        symbol = (tx.get("symbol") or "").upper()
+        out.append({
+            "timestamp": datetime.fromtimestamp(tx.get("timestamp", 0)).isoformat(),
+            "symbol": symbol,
+            "amount_usd": amount_usd,
+            "amount": tx.get("amount"),
+            "from_owner": (tx.get("from") or {}).get("owner_type", "unknown"),
+            "from_name": (tx.get("from") or {}).get("owner", ""),
+            "to_owner": (tx.get("to") or {}).get("owner_type", "unknown"),
+            "to_name": (tx.get("to") or {}).get("owner", ""),
+            "type": tx.get("transaction_type", "transfer"),
+            "hash": tx.get("hash", ""),
+        })
+    return out
+
+
+def aggregate_whale_flows(transactions: list[dict]) -> dict[str, dict]:
+    """Aggregiert Whale-Transactions je Symbol: {SYMBOL: {total_volume, n_tx, flow}}.
+
+    flow: "inflow" = mehr auf Exchanges (bearish), "outflow" = von Exchanges weg (bullish).
+    """
+    out: dict[str, dict] = {}
+    for tx in transactions:
+        sym = tx["symbol"]
+        if not sym:
+            continue
+        if sym not in out:
+            out[sym] = {
+                "symbol": sym,
+                "total_volume_usd": 0,
+                "n_transactions": 0,
+                "exchange_inflow_usd": 0,    # auf Exchange = Verkaufsabsicht
+                "exchange_outflow_usd": 0,   # von Exchange = HODL/Privacy
+                "top_tx": None,
+            }
+        amt = tx.get("amount_usd", 0)
+        out[sym]["total_volume_usd"] += amt
+        out[sym]["n_transactions"] += 1
+        # Flow-Klassifikation
+        if tx.get("to_owner") == "exchange" and tx.get("from_owner") != "exchange":
+            out[sym]["exchange_inflow_usd"] += amt
+        elif tx.get("from_owner") == "exchange" and tx.get("to_owner") != "exchange":
+            out[sym]["exchange_outflow_usd"] += amt
+        # Größte Tx merken
+        if out[sym]["top_tx"] is None or amt > out[sym]["top_tx"]["amount_usd"]:
+            out[sym]["top_tx"] = tx
+    for d in out.values():
+        net = d["exchange_outflow_usd"] - d["exchange_inflow_usd"]
+        if net > d["total_volume_usd"] * 0.3:
+            d["signal"] = "outflow-bullish"
+        elif net < -d["total_volume_usd"] * 0.3:
+            d["signal"] = "inflow-bearish"
+        else:
+            d["signal"] = "neutral"
+        d["net_flow_usd"] = net
+    return out
+
+
+# ============================================================================
 # FEAR & GREED INDEX (Krypto-Stimmung, alternative.me)
 # ============================================================================
 def fetch_fear_greed_crypto() -> dict | None:
@@ -1160,6 +1249,114 @@ def fetch_news_cryptopanic(ticker: str) -> list[dict]:
     return out
 
 
+NITTER_INSTANCES = [
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.tiekoetter.com",
+    "https://nitter.lunar.icu",
+]
+
+
+def fetch_news_hackernews(ticker: str, name: str | None = None) -> list[dict]:
+    """Hacker News via Algolia-Search-API. Gratis, kein Key.
+
+    Sucht in HN-Stories der letzten 14 Tage nach Ticker oder Firma.
+    Bei Tech-Aktien (NVDA, AAPL, MSFT, ...) oft sehr substanzielle Diskussionen.
+    """
+    cutoff_ts = int((datetime.now() - timedelta(days=NEWS_LOOKBACK_DAYS)).timestamp())
+    query = name or ticker
+    url = "https://hn.algolia.com/api/v1/search"
+    params = {
+        "query": query,
+        "tags": "story",
+        "numericFilters": f"created_at_i>{cutoff_ts},points>5",
+        "hitsPerPage": MAX_HEADLINES_PER_TICKER,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        hits = r.json().get("hits", [])
+    except Exception:
+        return []
+    out = []
+    for h in hits:
+        title = (h.get("title") or "").strip()
+        if not title:
+            continue
+        # Filter: muss Ticker oder Firma im Titel haben (Algolia matched auch Body)
+        up_title = title.upper()
+        if ticker.upper() not in up_title and (name or "").upper() not in up_title:
+            continue
+        created = h.get("created_at_i") or 0
+        date = datetime.fromtimestamp(created, tz=timezone.utc).strftime("%Y-%m-%d") if created else ""
+        points = int(h.get("points") or 0)
+        # HN-Sentiment: hohe Points + Tech-Diskussion → mild bullish
+        sentiment = None
+        if points >= 100:
+            sentiment = 0.3
+        elif points >= 30:
+            sentiment = 0.15
+        out.append({
+            "date": date,
+            "source": f"HackerNews ({points} pts)",
+            "headline": title[:200],
+            "url": h.get("url") or f"https://news.ycombinator.com/item?id={h.get('objectID')}",
+            "sentiment": sentiment,
+            "provider": "hackernews",
+        })
+    return out
+
+
+def fetch_news_nitter(ticker: str) -> list[dict]:
+    """Twitter/X-Suche via Nitter RSS — gratis, mehrere Mirror als Fallback.
+
+    Wird oft instabil — graceful skip wenn alle Mirror down.
+    """
+    query = f"${ticker}"
+    for base in NITTER_INSTANCES:
+        url = f"{base}/search/rss?f=tweets&q={quote_plus(query)}"
+        try:
+            feed = feedparser.parse(url)
+            if not feed.entries:
+                continue
+            cutoff = datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)
+            out = []
+            for entry in feed.entries[:MAX_HEADLINES_PER_TICKER * 2]:
+                try:
+                    pub = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                except Exception:
+                    pub = datetime.now(timezone.utc)
+                if pub < cutoff:
+                    continue
+                title = (entry.get("title") or "").strip()
+                if not title:
+                    continue
+                # Sehr einfaches Sentiment: positive/negative Wort-Counts
+                low = title.lower()
+                pos_kw = ["up", "bull", "rally", "moon", "buy", "long", "rocket",
+                          "🚀", "📈", "beat", "surge", "rip"]
+                neg_kw = ["down", "bear", "crash", "dump", "sell", "short", "puts",
+                          "📉", "miss", "drop", "tank", "rug"]
+                p_cnt = sum(1 for k in pos_kw if k in low)
+                n_cnt = sum(1 for k in neg_kw if k in low)
+                sentiment = None
+                if p_cnt + n_cnt > 0:
+                    sentiment = (p_cnt - n_cnt) / (p_cnt + n_cnt) * 0.5
+                out.append({
+                    "date": pub.strftime("%Y-%m-%d"),
+                    "source": "X/Twitter",
+                    "headline": title[:200],
+                    "url": entry.get("link", ""),
+                    "sentiment": sentiment,
+                    "provider": "nitter",
+                })
+            if out:
+                return out[:MAX_HEADLINES_PER_TICKER]
+        except Exception:
+            continue
+    return []
+
+
 def fetch_rss_topstories() -> list[dict]:
     """Globale Finanz-RSS-Feeds; einmal pro Run, dann pro Ticker gefiltert."""
     feeds = {
@@ -1254,6 +1451,7 @@ def fetch_news(
             (fetch_news_marketaux, ticker),
             (fetch_news_google_rss, name),
             (fetch_news_cryptopanic, ticker),
+            (fetch_news_nitter, ticker),
         ]
     else:
         fetchers = [
@@ -1262,6 +1460,7 @@ def fetch_news(
             (fetch_news_yahoo, ticker),
             (fetch_news_google_rss, name),
             (fetch_news_stocktwits, ticker),
+            (fetch_news_nitter, ticker),
         ]
 
     items: list[dict] = []
@@ -1272,6 +1471,13 @@ def fetch_news(
                 items.extend(fut.result())
             except Exception:
                 continue
+
+    # Hacker News (nur für Aktien, name optional)
+    if asset_type == "stock":
+        try:
+            items.extend(fetch_news_hackernews(ticker, name if name != ticker else None))
+        except Exception:
+            pass
 
     # Global RSS-Top-Stories filtern, falls Pool übergeben
     if rss_pool:
@@ -1437,6 +1643,183 @@ def fetch_reddit_buzz(ticker: str, subs: str) -> dict:
     if REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET:
         return fetch_reddit_buzz_praw(ticker, subs)
     return fetch_reddit_buzz_public(ticker, subs)
+
+
+_DISCOVERY_BLACKLIST = {
+    "USA", "USD", "CEO", "CFO", "CTO", "IPO", "ETF", "ETH", "BTC", "API",
+    "EPS", "PE", "PR", "DD", "FOMO", "YOLO", "ATH", "ATL", "EOD", "EOY",
+    "IRA", "401K", "SPY", "QQQ", "SPX", "VIX", "FOMC", "FED", "GDP", "CPI",
+    "RH", "WSB", "TLDR", "TLDW", "PT", "WTF", "OMG", "LOL",
+    "OPS", "GAAP", "EBIT", "EBITDA", "FY", "FCF", "ROE", "ROI",
+    "RSI", "MACD", "SMA", "EMA", "MA",
+    "I", "A", "AI", "EV", "OG",
+    "EU", "UK", "DE", "JP", "CN", "PM", "AM",
+    "MOD", "OP", "POST", "TLD", "URL", "PDF",
+    "NYSE", "NASDAQ", "SEC", "FDIC", "IRS",
+    "CEO", "COO", "VP",
+    "ITM", "OTM", "CALL", "PUT", "EPS",
+    "DAY", "WEEK", "YEAR",
+    "NEW", "OLD", "TOP", "BUY", "SELL", "HOLD",
+    "USD", "EUR", "GBP", "JPY", "CHF", "CAD",
+}
+
+
+def discover_reddit_trending_tickers(subs: str = REDDIT_STOCK_SUBS,
+                                      hours: int = 24,
+                                      exclude: set[str] | None = None,
+                                      max_retries: int = 3) -> list[dict]:
+    """Scannt Top-Posts in WSB/Stocks/etc. nach $TICKERS, die NICHT im Universum sind.
+
+    Erkennt Symbole im Stil $TSLA oder GME (3-5 Großbuchstaben).
+    Hat 429-Retry mit Backoff, weil Reddit public Endpoint streng ist.
+    """
+    import re
+    exclude = exclude or set()
+
+    url = f"https://www.reddit.com/r/{subs}/hot.json"
+    headers = {"User-Agent": REDDIT_USER_AGENT}
+    params = {"limit": 100}
+
+    posts: list[dict] = []
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=20)
+            if r.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            posts = data.get("data", {}).get("children", [])
+            if posts:
+                break
+        except Exception:
+            time.sleep(2)
+            continue
+    if not posts:
+        return []
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp()
+    ticker_pattern = re.compile(r"\$([A-Z]{1,5})\b|\b([A-Z]{3,5})\b")
+    counts: dict[str, dict] = {}
+
+    for child in posts:
+        d = child.get("data", {})
+        if d.get("created_utc", 0) < cutoff:
+            continue
+        title = (d.get("title") or "").strip()
+        body = (d.get("selftext") or "")[:500]
+        text = f" {title} {body}"
+        score = int(d.get("score", 0))
+
+        for match in ticker_pattern.finditer(text):
+            symbol = match.group(1) or match.group(2)
+            if not symbol or symbol in _DISCOVERY_BLACKLIST or symbol in exclude:
+                continue
+            if symbol not in counts:
+                counts[symbol] = {
+                    "ticker": symbol,
+                    "mentions": 0,
+                    "total_score": 0,
+                    "top_title": title[:120],
+                    "top_score": score,
+                    "subreddits": set(),
+                }
+            counts[symbol]["mentions"] += 1
+            counts[symbol]["total_score"] += score
+            counts[symbol]["subreddits"].add(d.get("subreddit", ""))
+            if score > counts[symbol]["top_score"]:
+                counts[symbol]["top_title"] = title[:120]
+                counts[symbol]["top_score"] = score
+
+    # Validierung: nur Tickers mit ≥3 Mentions ODER 1 Mention mit hohem Score
+    out = []
+    for symbol, info in counts.items():
+        if info["mentions"] >= 3 or info["total_score"] >= 500:
+            info["subreddits"] = sorted(info["subreddits"])
+            out.append(info)
+    out.sort(key=lambda x: (x["mentions"], x["total_score"]), reverse=True)
+    return out
+
+
+def validate_trending_ticker(ticker: str) -> dict | None:
+    """Prüft via yfinance ob ein Symbol als Aktien-Ticker existiert + holt Basis-Daten."""
+    try:
+        info = yf.Ticker(ticker).info or {}
+        if not info or info.get("regularMarketPrice") is None:
+            return None
+        return {
+            "ticker": ticker,
+            "name": info.get("longName") or info.get("shortName") or ticker,
+            "price": float(info.get("regularMarketPrice", 0)),
+            "market_cap": info.get("marketCap"),
+            "sector": info.get("sector", ""),
+        }
+    except Exception:
+        return None
+
+
+def analyze_wildcard_tickers(max_tickers: int = 15) -> tuple[list[dict], dict[str, pd.DataFrame]]:
+    """Pipeline: Reddit-Trending → Validate → OHLC-Fetch → Score wie Aktien.
+
+    Liefert (wildcard_rows, ohlc_dict) — kompatibel mit analyze_all_stocks-Format.
+    Setzt 'is_wildcard'=True + 'hype_metadata' für UI-Hinweise.
+    """
+    trending = discover_reddit_trending_tickers(
+        REDDIT_STOCK_SUBS, hours=48, exclude=set(US_STOCKS),
+    )
+    if not trending:
+        return [], {}
+
+    # Validate parallel
+    candidates: list[dict] = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(validate_trending_ticker, t["ticker"]): t
+                for t in trending[:max_tickers * 2]}
+        for fut in as_completed(futs):
+            hype = futs[fut]
+            try:
+                v = fut.result()
+                if v is not None:
+                    v["hype_metadata"] = hype
+                    candidates.append(v)
+            except Exception:
+                continue
+
+    # Sort by mentions × log(ups), take top-N
+    import math
+    candidates.sort(
+        key=lambda x: (x["hype_metadata"]["mentions"]
+                       * math.log10(max(x["hype_metadata"]["total_score"], 1) + 1)),
+        reverse=True,
+    )
+    candidates = candidates[:max_tickers]
+    if not candidates:
+        return [], {}
+
+    tickers = [c["ticker"] for c in candidates]
+    ohlc = fetch_stock_data_bulk(tickers)
+
+    rows = []
+    for c in candidates:
+        t = c["ticker"]
+        if t not in ohlc:
+            continue
+        try:
+            row = analyze_stock_df(ohlc[t], t, None)
+            row["name"] = c.get("name", t)
+            row["market_cap"] = c.get("market_cap")
+            row["sector_yf"] = c.get("sector", "")
+            row["is_wildcard"] = True
+            row["hype_metadata"] = c["hype_metadata"]
+            # Hype-Boost: bei vielen Reddit-Mentions +1
+            hm = c["hype_metadata"]
+            if hm["mentions"] >= 5 or hm["total_score"] >= 1000:
+                row["score"] += 1
+                row["signals"] += f", WSB-Hype {hm['mentions']}× ({hm['total_score']:,} ups)"
+            rows.append(row)
+        except Exception:
+            continue
+    return rows, ohlc
 
 
 def fetch_reddit_buzz_bulk(tickers: list[str], subs: str, max_workers: int = 10) -> dict[str, dict]:
