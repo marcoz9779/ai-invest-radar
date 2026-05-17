@@ -22,6 +22,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 from ta.trend import SMAIndicator
 
+from storage import (
+    get_consecutive_score_changes,
+    get_history,
+    get_recent_strong_signals,
+    get_stats as get_storage_stats,
+    save_snapshot_batch,
+)
 from main import (
     ANTHROPIC_API_KEY,
     CRYPTOPANIC_API_KEY,
@@ -318,6 +325,15 @@ def render_ticker_card(
                 badges.append(f":green[💼 Insider-Käufe ({insider['buys']})]")
             elif insider and insider.get("sells", 0) >= 3 and insider.get("net_shares", 0) < 0:
                 badges.append(f":red[💼 Insider-Verkäufe ({insider['sells']})]")
+            # Score-Trend-Badge aus History (Phase 6)
+            try:
+                trend = get_consecutive_score_changes(ticker, days=7)
+                if trend >= 3:
+                    badges.append(f":green[📈 Score steigt {trend} Tage in Folge]")
+                elif trend <= -3:
+                    badges.append(f":red[📉 Score fällt {-trend} Tage in Folge]")
+            except Exception:
+                pass
             if news_sentiment and news_sentiment.get("total_scored", 0) >= 3:
                 ratio = news_sentiment.get("ratio")
                 if ratio is not None:
@@ -379,7 +395,7 @@ def render_ticker_card(
             if fund_items:
                 st.caption(" · ".join(fund_items))
 
-        with st.expander("Details: TradingView-Chart · News · Reddit · AI-Sentiment"):
+        with st.expander("Details: TradingView-Chart · History · News · Reddit · AI-Sentiment"):
             # TradingView Chart
             if tv_symbol:
                 container_id = (
@@ -388,6 +404,39 @@ def render_ticker_card(
                 render_tradingview(tv_symbol, container_id, height=420)
             else:
                 st.caption("(Kein TradingView-Symbol verfügbar)")
+
+            # Score-History (Phase 6 — wird mit jedem Tag interessanter)
+            try:
+                history = get_history(ticker, days=30)
+                if len(history) >= 2:
+                    st.markdown("**Score-History (letzte 30 Tage)**")
+                    hist_df = pd.DataFrame(history)[["date", "score", "mentions", "vol_spike"]]
+                    hist_fig = go.Figure()
+                    hist_fig.add_trace(go.Scatter(
+                        x=hist_df["date"], y=hist_df["score"],
+                        mode="lines+markers", name="Score",
+                        line=dict(color="#16a34a", width=2),
+                        fill="tozeroy", fillcolor="rgba(22,163,74,0.15)",
+                    ))
+                    hist_fig.add_hline(y=0, line=dict(color="#888", dash="dash"))
+                    hist_fig.update_layout(
+                        height=200, template="plotly_dark",
+                        margin=dict(t=10, b=20, l=20, r=20),
+                        yaxis_title="Score",
+                    )
+                    st.plotly_chart(
+                        hist_fig, width="stretch",
+                        key=f"hist_{asset_type}_{ticker}_{key_suffix}",
+                    )
+                elif len(history) == 1:
+                    st.caption(
+                        f"📊 History: 1 Datenpunkt vom {history[0]['date']}. "
+                        "Ab 2 Tagen wird hier ein Score-Trend-Chart angezeigt."
+                    )
+                else:
+                    st.caption("📊 Noch keine History. Wird ab dem zweiten Run gebaut.")
+            except Exception:
+                pass
 
             col_news, col_reddit = st.columns(2)
             with col_news:
@@ -542,6 +591,18 @@ with st.sidebar:
     st.markdown(f"**Telegram:** {telegram_status}")
     st.caption(f"Lookback: {NEWS_LOOKBACK_DAYS}d · {MAX_HEADLINES_PER_TICKER} Headlines/Ticker")
 
+    # Storage-Stats (Phase 6)
+    try:
+        stats = get_storage_stats()
+        if stats["snapshots"] > 0:
+            st.markdown(
+                f"**History:** {stats['days_tracked']} Tage · "
+                f"{stats['snapshots']} Snapshots · "
+                f"{stats['strong_signals']} STRONG-Events"
+            )
+    except Exception:
+        pass
+
 
 # ============================================================================
 # DATEN LADEN
@@ -642,6 +703,13 @@ for c in crypto_rows:
     c["pattern_reasons"] = reasons
     if pattern:
         c["label"] = pattern
+
+
+# Snapshot in SQLite speichern (Phase 6 — History/Trend-Tracking)
+try:
+    save_snapshot_batch(stock_rows + crypto_rows)
+except Exception as e:
+    st.warning(f"Storage-Fehler: {e}")
 
 # Filter
 stock_rows_f = [s for s in stock_rows

@@ -65,6 +65,7 @@ jobs:
           path: |
             last_signals.json
             last_watcher.json
+            data.db
           key: alerts-state-${{ github.run_id }}
           restore-keys: |
             alerts-state-
@@ -97,4 +98,5 @@ jobs:
           path: |
             last_signals.json
             last_watcher.json
+            data.db
           key: alerts-state-${{ github.run_id }}

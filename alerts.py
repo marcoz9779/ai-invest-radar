@@ -45,6 +45,7 @@ from main import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
+from storage import save_snapshot_batch
 
 WATCHER_STATE_PATH = Path(__file__).parent / "last_watcher.json"
 WATCHER_THROTTLE_HOURS = 4
@@ -100,6 +101,13 @@ def collect_signals():
         pattern_label, reasons = multi_signal_pattern(c)
         c["pattern_label"] = pattern_label
         c["pattern_reasons"] = reasons
+
+    # Persistiere Snapshot in SQLite für History/Trend-Tracking
+    try:
+        n = save_snapshot_batch(stocks + cryptos)
+        print(f"[storage] {n} Snapshots gespeichert.")
+    except Exception as e:
+        print(f"[storage] Fehler: {e}", file=sys.stderr)
 
     return stocks + cryptos, stocks, cryptos
 

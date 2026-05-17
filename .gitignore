@@ -11,3 +11,5 @@ data/cache/
 .idea/
 watchlist.json
 last_signals.json
+last_watcher.json
+data.db
