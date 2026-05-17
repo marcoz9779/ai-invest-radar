@@ -31,12 +31,16 @@ streamlit run app.py
 - Indikatoren: **RSI**, **MACD**, **SMA20/SMA50**
 - Transparenter, regelbasierter Score je Asset
 
-**News (Phase 2) – 4 Quellen parallel + dedupliziert:**
+**News (Phase 2 + 4) – 7 Quellen parallel + dedupliziert:**
 - **Marketaux** (primär, $19-$29/Monat) – kuratierte Finanz-News mit Sentiment-Score
+- **Finnhub** (gratis als Zusatz-Layer)
 - **Yahoo Finance** (gratis via yfinance)
 - **Google News RSS** (gratis)
-- **Finnhub** (gratis als Zusatz-Layer)
+- **StockTwits** (gratis, Aktien) – Retail-Trader-Sentiment mit explizitem Bullish/Bearish-Tag
+- **CryptoPanic** (gratis Plan, Krypto) – kuratierte News mit Community-Bull/Bear-Votes
+- **Global RSS-Top-Stories** – MarketWatch, Yahoo, CNBC Markets, CNBC Investing, Reuters Business
 - Headlines werden nach Titel-Hash dedupliziert; Sentiment von Marketaux wird priorisiert
+- **Bullish/Bearish-Ratio** wird aus allen sentiment-getaggten Quellen berechnet
 
 **Reddit-Buzz (Phase 2.5):**
 - 10 Subreddits für Aktien (wallstreetbets, stocks, investing, StockMarket, options, ValueInvesting, SecurityAnalysis, dividends, pennystocks, Daytrading)
@@ -79,6 +83,21 @@ streamlit run app.py
 - Vergleicht gegen Buy-and-Hold (Alpha-Metrik)
 - Equity-Curve + Trade-Historie als Tabelle
 
+**Multi-Signal-Pattern (Phase 4):**
+- **STRONG BUY** wenn ≥3 unabhängige Signale konvergieren:
+  Tech-Score, Reddit-Spike, Insider-Käufe, News-Bullish-Ratio
+- **STRONG SELL** symmetrisch (Tech-Score, Insider-Verkäufe, News-Bearish)
+- Nur STRONG-Pattern triggern Telegram-Alerts → kein Spam
+- Reasons werden auf der Karte angezeigt ("Tech-Score+3, Insider-Käufe, News 80% bullish")
+
+**Telegram-Alerts (Phase 5):**
+- `alerts.py` als CLI-Script (auch für cron/scheduler)
+- `python alerts.py --test` → Test-Nachricht
+- `python alerts.py` → Diff-Alerts (nur neue STRONG-Signale)
+- `python alerts.py --digest` → Tägliche Morning-Zusammenfassung
+- `last_signals.json` speichert vorherigen Stand (gitignored)
+- Im Dashboard: Sidebar-Buttons für Morning-Digest + Test-Alert
+
 **Datenquellen — Übersicht:**
 | Daten | Provider | Kosten |
 |-------|----------|--------|
@@ -108,8 +127,9 @@ streamlit run app.py
 | 2.9 | Earnings + Insider + Fundamentaldaten + Watchlist | ✅ |
 | 3 | Claude AI-Sentiment-Fusion (Hook im Code) | ✅ Code drin, Key optional |
 | 3.5 | Backtest-Engine (90-Tage P&L, Alpha vs Buy-and-Hold) | ✅ |
-| 4 | Earnings-Surprise-Tracking + Konsens-Daten | offen |
-| 5 | Telegram-Bot für tägliche Alerts | offen |
+| 4 | Multi-Signal-Pattern (STRONG BUY/SELL) + News-Sentiment-Ratio | ✅ |
+| 4.5 | News-Tiefe: StockTwits + CryptoPanic + RSS-Top-Stories | ✅ |
+| 5 | Telegram-Alerts (Diff + Morning-Digest, alerts.py CLI) | ✅ |
 | 6 | SQLite-Storage + History-Charts | offen |
 | 7 | Swissquote-Whitelist als Filter | offen |
 

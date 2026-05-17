@@ -34,6 +34,9 @@ REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "ai-invest-radar/0.1").strip()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 NEWS_LOOKBACK_DAYS = 7
 MAX_HEADLINES_PER_TICKER = 5  # mehr Quellen → mehr Headlines anzeigen
@@ -815,6 +818,135 @@ def fetch_news_google_rss(query: str) -> list[dict]:
     return out[:MAX_HEADLINES_PER_TICKER]
 
 
+def fetch_news_stocktwits(ticker: str) -> list[dict]:
+    """StockTwits: Retail-Trader-Sentiment für Aktien, gratis, KEIN Key.
+
+    Jede Message hat optional ein explicit "Bullish" oder "Bearish" Tag.
+    """
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "ai-invest-radar/0.1"})
+        if r.status_code != 200:
+            return []
+        messages = r.json().get("messages", [])
+    except Exception:
+        return []
+    out = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)).timestamp()
+    for m in messages[:MAX_HEADLINES_PER_TICKER * 3]:
+        body = (m.get("body") or "").strip()
+        if not body:
+            continue
+        created = m.get("created_at", "")
+        try:
+            ts = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+            if ts < cutoff:
+                continue
+        except Exception:
+            pass
+        ent = m.get("entities") or {}
+        sent_basic = (ent.get("sentiment") or {}).get("basic")
+        sentiment = 0.6 if sent_basic == "Bullish" else -0.6 if sent_basic == "Bearish" else None
+        out.append({
+            "date": created[:10],
+            "source": f"@{m.get('user', {}).get('username', 'StockTwits')}",
+            "headline": body[:200],
+            "url": f"https://stocktwits.com/{m.get('user', {}).get('username', '')}/message/{m.get('id', '')}",
+            "sentiment": sentiment,
+            "provider": "stocktwits",
+        })
+    return out[:MAX_HEADLINES_PER_TICKER]
+
+
+def fetch_news_cryptopanic(ticker: str) -> list[dict]:
+    """CryptoPanic: kuratierte Krypto-News + Community-Bull/Bear-Votes."""
+    if not CRYPTOPANIC_API_KEY:
+        return []
+    url = "https://cryptopanic.com/api/v1/posts/"
+    params = {
+        "auth_token": CRYPTOPANIC_API_KEY,
+        "currencies": ticker,
+        "public": "true",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+    except Exception:
+        return []
+    out = []
+    for p in results[:MAX_HEADLINES_PER_TICKER]:
+        votes = p.get("votes") or {}
+        pos = int(votes.get("positive") or 0)
+        neg = int(votes.get("negative") or 0)
+        sentiment = None
+        if pos + neg > 0:
+            sentiment = (pos - neg) / (pos + neg)  # -1 .. +1
+        out.append({
+            "date": (p.get("created_at") or "")[:10],
+            "source": (p.get("source") or {}).get("title", "CryptoPanic"),
+            "headline": (p.get("title") or "").strip(),
+            "url": p.get("url", ""),
+            "sentiment": sentiment,
+            "provider": "cryptopanic",
+        })
+    return out
+
+
+def fetch_rss_topstories() -> list[dict]:
+    """Globale Finanz-RSS-Feeds; einmal pro Run, dann pro Ticker gefiltert."""
+    feeds = {
+        "MarketWatch": "https://feeds.marketwatch.com/marketwatch/topstories/",
+        "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
+        "CNBC Markets": "https://www.cnbc.com/id/15839069/device/rss/rss.html",
+        "CNBC Investing": "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+        "Reuters Business": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+    }
+    all_items: list[dict] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=NEWS_LOOKBACK_DAYS)
+    for src, url in feeds.items():
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:30]:
+                try:
+                    pub = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                except Exception:
+                    pub = datetime.now(timezone.utc)
+                if pub < cutoff:
+                    continue
+                all_items.append({
+                    "date": pub.strftime("%Y-%m-%d"),
+                    "source": src,
+                    "headline": (entry.get("title") or "").strip(),
+                    "url": entry.get("link", ""),
+                    "sentiment": None,
+                    "provider": "rss-top",
+                    "_search_text": (
+                        (entry.get("title") or "")
+                        + " "
+                        + (entry.get("summary") or "")
+                    ).upper(),
+                })
+        except Exception:
+            continue
+    return all_items
+
+
+def filter_rss_for_ticker(rss_items: list[dict], ticker: str, name: str = "") -> list[dict]:
+    """Sucht Top-RSS-Stories die Ticker oder Firmen-Name erwähnen."""
+    needles = [f"${ticker.upper()}", f" {ticker.upper()} "]
+    if name:
+        needles.append(name.upper())
+    out = []
+    for item in rss_items:
+        text = item.get("_search_text", "")
+        for needle in needles:
+            if needle in text:
+                out.append({k: v for k, v in item.items() if not k.startswith("_")})
+                break
+    return out[:MAX_HEADLINES_PER_TICKER]
+
+
 def _dedup_news(items: list[dict]) -> list[dict]:
     """Headlines aus mehreren Quellen mergen — gleiche Headline = 1 Eintrag.
 
@@ -837,28 +969,74 @@ def _dedup_news(items: list[dict]) -> list[dict]:
     return merged[:MAX_HEADLINES_PER_TICKER]
 
 
-def fetch_news(ticker: str, query_name: str | None = None) -> list[dict]:
-    """Aggregiert News aus allen verfügbaren Quellen parallel + dedupliziert.
+def fetch_news(
+    ticker: str,
+    query_name: str | None = None,
+    asset_type: str = "stock",
+    rss_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Aggregiert News aus ALLEN verfügbaren Quellen parallel + dedupliziert.
 
-    query_name: für Krypto den vollen Namen ("Bitcoin") statt Ticker ("BTC") nutzen,
-    sonst findet Google News nichts Brauchbares.
+    Aktien: Marketaux + Finnhub + Yahoo + Google + StockTwits + RSS-Pool
+    Krypto: Marketaux + Google + CryptoPanic + RSS-Pool
     """
     name = query_name or ticker
-    fetchers = [
-        (fetch_news_marketaux, ticker),
-        (fetch_news_finnhub, ticker),
-        (fetch_news_yahoo, ticker),
-        (fetch_news_google_rss, name),
-    ]
+
+    if asset_type == "crypto":
+        fetchers = [
+            (fetch_news_marketaux, ticker),
+            (fetch_news_google_rss, name),
+            (fetch_news_cryptopanic, ticker),
+        ]
+    else:
+        fetchers = [
+            (fetch_news_marketaux, ticker),
+            (fetch_news_finnhub, ticker),
+            (fetch_news_yahoo, ticker),
+            (fetch_news_google_rss, name),
+            (fetch_news_stocktwits, ticker),
+        ]
+
     items: list[dict] = []
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         futures = {ex.submit(fn, arg): fn.__name__ for fn, arg in fetchers}
         for fut in as_completed(futures):
             try:
                 items.extend(fut.result())
             except Exception:
                 continue
+
+    # Global RSS-Top-Stories filtern, falls Pool übergeben
+    if rss_pool:
+        items.extend(filter_rss_for_ticker(rss_pool, ticker, name))
+
     return _dedup_news(items)
+
+
+def news_sentiment_ratio(headlines: list[dict]) -> dict:
+    """Aggregiert Sentiment aus allen Headlines mit Score.
+
+    Liefert {bullish, bearish, neutral, total_scored, ratio}.
+    ratio: 0..1, wobei 1 = nur bullish, 0 = nur bearish, 0.5 = neutral.
+    """
+    bullish = bearish = neutral = 0
+    for h in headlines:
+        s = h.get("sentiment")
+        if s is None:
+            continue
+        if s > 0.15:
+            bullish += 1
+        elif s < -0.15:
+            bearish += 1
+        else:
+            neutral += 1
+    total = bullish + bearish + neutral
+    if total == 0:
+        return {"bullish": 0, "bearish": 0, "neutral": 0,
+                "total_scored": 0, "ratio": None}
+    ratio = bullish / (bullish + bearish) if (bullish + bearish) > 0 else 0.5
+    return {"bullish": bullish, "bearish": bearish, "neutral": neutral,
+            "total_scored": total, "ratio": round(ratio, 2)}
 
 
 def _format_sentiment(score: float | None) -> str:
@@ -1065,6 +1243,56 @@ def claude_sentiment_fusion(ticker: str, headlines: list[dict],
 
 
 # ============================================================================
+# MULTI-SIGNAL PATTERN-DETECTION (STRONG BUY / STRONG SELL)
+# ============================================================================
+def multi_signal_pattern(asset: dict) -> tuple[str | None, list[str]]:
+    """Erkennt Konvergenz mehrerer unabhängiger Signale.
+
+    STRONG BUY/SELL nur wenn ≥3 unabhängige Signale in dieselbe Richtung zeigen.
+    Liefert (label, list_of_contributing_signals).
+    """
+    score = asset.get("score", 0)
+    buzz = asset.get("buzz") or {}
+    insider = asset.get("insider") or {}
+    news_ratio = (asset.get("news_sentiment") or {}).get("ratio")
+    has_earnings_soon = bool(asset.get("earnings_date"))
+
+    bullish: list[str] = []
+    bearish: list[str] = []
+
+    # 1) Tech-Score
+    if score >= 3:
+        bullish.append("Tech-Score+3")
+    elif score >= 1 and has_earnings_soon:
+        bullish.append("Earnings + bullish Tech")
+    elif score <= -3:
+        bearish.append("Tech-Score-3")
+
+    # 2) Reddit-Buzz
+    if buzz.get("velocity", 0) >= 2.5 and buzz.get("mentions_24h", 0) >= 3:
+        bullish.append(f"Reddit-Spike {buzz['velocity']}x")
+
+    # 3) Insider-Trades
+    if insider.get("buys", 0) >= 3 and insider.get("net_shares", 0) > 0:
+        bullish.append(f"Insider-Käufe ({insider['buys']})")
+    elif insider.get("sells", 0) >= 5 and insider.get("net_shares", 0) < 0:
+        bearish.append(f"Insider-Verkäufe ({insider['sells']})")
+
+    # 4) News-Sentiment-Ratio (aus mehreren Quellen)
+    if news_ratio is not None and (asset.get("news_sentiment") or {}).get("total_scored", 0) >= 3:
+        if news_ratio >= 0.7:
+            bullish.append(f"News bullish {int(news_ratio*100)}%")
+        elif news_ratio <= 0.3:
+            bearish.append(f"News bearish {int(news_ratio*100)}%")
+
+    if len(bullish) >= 3:
+        return "STRONG BUY", bullish
+    if len(bearish) >= 3:
+        return "STRONG SELL", bearish
+    return None, []
+
+
+# ============================================================================
 # EMPFEHLUNGS-LOGIK
 # ============================================================================
 def recommendation_label(score: int, mentions_24h: int = 0, velocity: float = 0,
@@ -1213,6 +1441,121 @@ def backtest_ticker(df: pd.DataFrame, ticker: str = "", initial_capital: float =
         "final_equity": round(equity, 2),
         "equity_curve": equity_curve,
     }
+
+
+# ============================================================================
+# TELEGRAM-BOT (Phase 5)
+# ============================================================================
+SIGNALS_HISTORY_PATH = Path(__file__).parent / "last_signals.json"
+
+
+def load_last_signals() -> dict:
+    if not SIGNALS_HISTORY_PATH.exists():
+        return {}
+    try:
+        return json.loads(SIGNALS_HISTORY_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def save_signals(signals: dict) -> None:
+    SIGNALS_HISTORY_PATH.write_text(json.dumps(signals, indent=2))
+
+
+def send_telegram(message: str, parse_mode: str = "Markdown") -> bool:
+    """Schickt eine Telegram-Nachricht via Bot-API. Liefert True bei Erfolg."""
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def telegram_get_chat_id() -> str | None:
+    """Holt die letzte Chat-ID aus den getUpdates des Bots.
+
+    Erst aufrufen NACHDEM der User dem Bot eine erste Message geschickt hat.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        updates = r.json().get("result", [])
+        if not updates:
+            return None
+        chat_id = updates[-1].get("message", {}).get("chat", {}).get("id")
+        return str(chat_id) if chat_id else None
+    except Exception:
+        return None
+
+
+def format_alert_signal(asset: dict, pattern_label: str, reasons: list[str]) -> str:
+    """Formatiert eine einzelne STRONG-BUY/SELL-Alert-Nachricht."""
+    emoji = "🚀" if pattern_label == "STRONG BUY" else "⚠️"
+    asset_type = "Aktie" if asset.get("type") == "stock" else "Krypto"
+    price = asset.get("price", 0)
+    price_str = f"${price:,.2f}" if price >= 1 else f"${price:.6f}"
+    lines = [
+        f"{emoji} *{pattern_label}* — `{asset['ticker']}` ({asset_type})",
+        f"Preis: {price_str}  ·  Score: {asset.get('score', 0):+d}",
+        "",
+        "*Konvergierende Signale:*",
+    ]
+    for r in reasons:
+        lines.append(f"  • {r}")
+    return "\n".join(lines)
+
+
+def build_morning_digest(stocks: list[dict], cryptos: list[dict],
+                        fear_greed: dict | None = None) -> str:
+    """Baut die tägliche Morning-Zusammenfassung für Telegram."""
+    today = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"*🌅 AI Invest Radar — {today}*", ""]
+
+    if fear_greed:
+        lines.append(f"_Krypto Fear&Greed:_ {fear_greed['value']}/100 — {fear_greed['classification']}")
+        lines.append("")
+
+    strong_buys = [a for a in stocks + cryptos if a.get("pattern_label") == "STRONG BUY"]
+    strong_sells = [a for a in stocks + cryptos if a.get("pattern_label") == "STRONG SELL"]
+
+    if strong_buys:
+        lines.append("🚀 *STRONG BUY:*")
+        for a in strong_buys[:5]:
+            reasons = ", ".join(a.get("pattern_reasons", [])[:3])
+            lines.append(f"  • `{a['ticker']}` — {reasons}")
+        lines.append("")
+
+    if strong_sells:
+        lines.append("⚠️ *STRONG SELL:*")
+        for a in strong_sells[:5]:
+            reasons = ", ".join(a.get("pattern_reasons", [])[:3])
+            lines.append(f"  • `{a['ticker']}` — {reasons}")
+        lines.append("")
+
+    # Regular top-buys als Bonus
+    buys = [a for a in stocks + cryptos
+            if a.get("label") == "BUY" and a.get("pattern_label") != "STRONG BUY"]
+    if buys[:3]:
+        lines.append("📈 *Weitere BUY-Signale:*")
+        for a in buys[:3]:
+            lines.append(f"  • `{a['ticker']}` — Score {a['score']:+d}  ·  {a['signals'][:60]}")
+
+    if not strong_buys and not strong_sells and not buys:
+        lines.append("_Heute keine starken Signale._")
+
+    return "\n".join(lines)
 
 
 # ============================================================================

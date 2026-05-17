@@ -24,6 +24,7 @@ from ta.trend import SMAIndicator
 
 from main import (
     ANTHROPIC_API_KEY,
+    CRYPTOPANIC_API_KEY,
     FINNHUB_API_KEY,
     MARKETAUX_API_KEY,
     MAX_HEADLINES_PER_TICKER,
@@ -33,18 +34,25 @@ from main import (
     REDDIT_CLIENT_SECRET,
     REDDIT_CRYPTO_SUBS,
     REDDIT_STOCK_SUBS,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     US_STOCKS,
     analyze_all_stocks,
     analyze_crypto,
     backtest_ticker,
+    build_morning_digest,
     claude_sentiment_fusion,
     fetch_fear_greed_crypto,
     fetch_news,
     fetch_reddit_buzz_bulk,
+    fetch_rss_topstories,
     fetch_sector_performance,
     load_watchlist,
+    multi_signal_pattern,
+    news_sentiment_ratio,
     news_velocity,
     recommendation_label,
+    send_telegram,
     toggle_watchlist,
 )
 
@@ -77,8 +85,14 @@ def cached_crypto():
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def cached_news(ticker: str, name: str | None = None):
-    return fetch_news(ticker, name)
+def cached_news(ticker: str, name: str | None = None, asset_type: str = "stock"):
+    rss_pool = cached_rss_topstories()
+    return fetch_news(ticker, name, asset_type, rss_pool)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_rss_topstories():
+    return fetch_rss_topstories()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -130,11 +144,13 @@ def fmt_pct(v: float | None) -> str:
 # Styling-Helpers
 # ----------------------------------------------------------------------------
 LABEL_STYLES = {
-    "BUY":    ("#16a34a", "white"),   # green
-    "WATCH":  ("#eab308", "black"),   # yellow
-    "HOLD":   ("#6b7280", "white"),   # gray
-    "REDUCE": ("#f97316", "white"),   # orange
-    "SELL":   ("#dc2626", "white"),   # red
+    "STRONG BUY":  ("#15803d", "white"),  # dark-green, BIG
+    "BUY":         ("#16a34a", "white"),  # green
+    "WATCH":       ("#eab308", "black"),  # yellow
+    "HOLD":        ("#6b7280", "white"),  # gray
+    "REDUCE":      ("#f97316", "white"),  # orange
+    "SELL":        ("#dc2626", "white"),  # red
+    "STRONG SELL": ("#991b1b", "white"),  # dark-red, BIG
 }
 
 
@@ -218,8 +234,8 @@ def sentiment_inline(score: float | None) -> str:
     return f" :gray[({score:+.2f})]"
 
 
-def render_news_block(ticker: str, name: str | None = None):
-    headlines = cached_news(ticker, name)
+def render_news_block(ticker: str, name: str | None = None, asset_type: str = "stock"):
+    headlines = cached_news(ticker, name, asset_type)
     if not headlines:
         st.caption("Keine News.")
         return headlines
@@ -266,6 +282,8 @@ def render_ticker_card(
     fundamentals: dict | None = None,
     insider: dict | None = None,
     key_suffix: str = "main",
+    news_sentiment: dict | None = None,
+    pattern_reasons: list[str] | None = None,
 ):
     """Karte pro Ticker mit Logo, Sparkline, Label, Earnings/Insider/News-Velocity-Badges."""
     with st.container(border=True):
@@ -300,8 +318,26 @@ def render_ticker_card(
                 badges.append(f":green[💼 Insider-Käufe ({insider['buys']})]")
             elif insider and insider.get("sells", 0) >= 3 and insider.get("net_shares", 0) < 0:
                 badges.append(f":red[💼 Insider-Verkäufe ({insider['sells']})]")
+            if news_sentiment and news_sentiment.get("total_scored", 0) >= 3:
+                ratio = news_sentiment.get("ratio")
+                if ratio is not None:
+                    if ratio >= 0.65:
+                        badges.append(
+                            f":green[📰 News {int(ratio*100)}% bullish "
+                            f"({news_sentiment['bullish']}/{news_sentiment['total_scored']})]"
+                        )
+                    elif ratio <= 0.35:
+                        badges.append(
+                            f":red[📰 News {int((1-ratio)*100)}% bearish "
+                            f"({news_sentiment['bearish']}/{news_sentiment['total_scored']})]"
+                        )
             if badges:
                 st.markdown(" · ".join(badges))
+            # STRONG-Pattern-Reasons als Hinweis
+            if pattern_reasons:
+                st.markdown(
+                    "**Multi-Signal:** " + " · ".join(f":violet[{r}]" for r in pattern_reasons)
+                )
 
         with col_chart:
             if sparkline_data is not None and len(sparkline_data) > 1:
@@ -355,8 +391,10 @@ def render_ticker_card(
 
             col_news, col_reddit = st.columns(2)
             with col_news:
-                st.markdown("**News (aus 4 Quellen, dedupliziert)**")
-                headlines = render_news_block(ticker, name if name and name != ticker else None)
+                st.markdown("**News (Multi-Source, dedupliziert)**")
+                headlines = render_news_block(
+                    ticker, name if name and name != ticker else None, asset_type,
+                )
             with col_reddit:
                 st.markdown("**Reddit-Buzz**")
                 posts = render_reddit_block(buzz) if buzz else []
@@ -496,8 +534,32 @@ with st.sidebar:
         ":green[PRAW auth]" if (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET)
         else ":blue[anonym/public]"
     )
+    telegram_status = (
+        ":green[✓ konfiguriert]" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+        else ":orange[Token fehlt]"
+    )
     st.markdown(f"**Reddit:** {reddit_mode}")
+    st.markdown(f"**Telegram:** {telegram_status}")
     st.caption(f"Lookback: {NEWS_LOOKBACK_DAYS}d · {MAX_HEADLINES_PER_TICKER} Headlines/Ticker")
+
+    # Telegram-Aktionen
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        st.divider()
+        st.subheader("Telegram-Aktionen")
+        if st.button("📤 Morning-Digest senden", width="stretch"):
+            from main import fetch_fear_greed_crypto as _fg
+            fg_now = _fg()
+            msg = build_morning_digest(stock_rows, crypto_rows, fg_now)
+            if send_telegram(msg):
+                st.success("Digest gesendet!")
+            else:
+                st.error("Senden fehlgeschlagen.")
+        if st.button("🔔 Test-Alert senden", width="stretch"):
+            ok = send_telegram(f"*Test* via Dashboard — {datetime.now():%H:%M}")
+            if ok:
+                st.success("Test gesendet!")
+            else:
+                st.error("Senden fehlgeschlagen.")
 
 
 # ============================================================================
@@ -532,7 +594,7 @@ if load_reddit:
             tuple(c["ticker"] for c in crypto_rows), REDDIT_CRYPTO_SUBS
         )
 
-# Labels berechnen
+# Labels berechnen + News-Sentiment-Ratio aggregieren (für Multi-Signal-Pattern)
 for s in stock_rows:
     buzz = stock_buzz.get(s["ticker"], {})
     s["label"] = recommendation_label(
@@ -542,6 +604,7 @@ for s in stock_rows:
         has_earnings_soon=bool(s.get("earnings_date")),
     )
     s["buzz"] = buzz
+    s["type"] = "stock"
 
 for c in crypto_rows:
     buzz = crypto_buzz.get(c["ticker"], {})
@@ -551,6 +614,53 @@ for c in crypto_rows:
         buzz.get("velocity", 0),
     )
     c["buzz"] = buzz
+    c["type"] = "crypto"
+
+
+# News-Sentiment + Multi-Signal-Pattern wird gleich beim Header berechnet,
+# aber für alle Assets cheaply: leere news_sentiment dict, Pattern wird im
+# Expander oder im Header neu berechnet wenn user es will. Hier Quick-Aggregation
+# nur für die Top-Assets (statt 80 News-Calls beim Page-Load).
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_news_sentiment_top(tickers_tuple: tuple, asset_type: str = "stock") -> dict:
+    """Aggregiert news_sentiment_ratio nur für die Top-N (sonst zu viele Calls)."""
+    out: dict[str, dict] = {}
+    for t in tickers_tuple:
+        try:
+            headlines = cached_news(t, None, asset_type)
+            out[t] = news_sentiment_ratio(headlines)
+        except Exception:
+            out[t] = {"ratio": None, "bullish": 0, "bearish": 0, "neutral": 0, "total_scored": 0}
+    return out
+
+
+# Top-Kandidaten ermitteln (nach simplem Label-Score) und news-sentiment nur für die holen
+top_stock_tickers = tuple(s["ticker"] for s in
+                          sorted(stock_rows, key=lambda x: -x["score"])[:15])
+top_crypto_tickers = tuple(c["ticker"] for c in
+                           sorted(crypto_rows, key=lambda x: -x["score"])[:15])
+
+with st.spinner("Lade News-Sentiment für Top-Picks (Pattern-Detection)..."):
+    stock_news_sent = cached_news_sentiment_top(top_stock_tickers, "stock")
+    crypto_news_sent = cached_news_sentiment_top(top_crypto_tickers, "crypto")
+
+# Multi-Signal-Pattern attachen
+for s in stock_rows:
+    s["news_sentiment"] = stock_news_sent.get(s["ticker"], {})
+    pattern, reasons = multi_signal_pattern(s)
+    s["pattern_label"] = pattern
+    s["pattern_reasons"] = reasons
+    if pattern:
+        s["label"] = pattern  # Pattern-Label überschreibt regular label
+
+for c in crypto_rows:
+    c["news_sentiment"] = crypto_news_sent.get(c["ticker"], {})
+    pattern, reasons = multi_signal_pattern(c)
+    c["pattern_label"] = pattern
+    c["pattern_reasons"] = reasons
+    if pattern:
+        c["label"] = pattern
 
 # Filter
 stock_rows_f = [s for s in stock_rows
@@ -691,6 +801,8 @@ def render_stock_card(s: dict, key_suffix: str = "main"):
         fundamentals=s.get("fundamentals"),
         insider=s.get("insider"),
         key_suffix=key_suffix,
+        news_sentiment=s.get("news_sentiment"),
+        pattern_reasons=s.get("pattern_reasons"),
     )
 
 
@@ -715,6 +827,8 @@ def render_crypto_card(c: dict, key_suffix: str = "main"):
         tv_symbol=tradingview_symbol(c["ticker"], "crypto"),
         asset_type="crypto",
         key_suffix=key_suffix,
+        news_sentiment=c.get("news_sentiment"),
+        pattern_reasons=c.get("pattern_reasons"),
     )
 
 

@@ -10,3 +10,4 @@ data/cache/
 .vscode/
 .idea/
 watchlist.json
+last_signals.json
