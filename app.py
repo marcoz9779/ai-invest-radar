@@ -660,15 +660,16 @@ def render_ticker_card(
             if fund_items:
                 st.caption(" · ".join(fund_items))
 
-        with st.expander("Details: TradingView-Chart · History · News · Reddit · AI-Sentiment"):
-            # TradingView Chart
-            if tv_symbol:
-                container_id = (
-                    f"tv_{asset_type}_{ticker.replace('-', '_').replace('.', '_')}_{key_suffix}"
-                )
-                render_tradingview(tv_symbol, container_id, height=420)
-            else:
-                st.caption("(Kein TradingView-Symbol verfügbar)")
+        with st.expander("Details: Chart · History · News · Reddit · AI-Sentiment"):
+            # Voller Candlestick mit Plotly (nutzt schon-geladene OHLC, kein externes JS)
+            ohlc_for_chart = sparkline_data
+            if ohlc_for_chart is not None and len(ohlc_for_chart) > 1:
+                # Wir holen das volle OHLC-DataFrame via parent scope
+                full_df = stock_ohlc.get(ticker) if asset_type == "stock" else crypto_ohlc.get(ticker)
+                if full_df is None:
+                    full_df = wildcard_ohlc.get(ticker) if asset_type == "stock" else None
+                if full_df is not None:
+                    render_full_chart(full_df, ticker)
 
             # Score-History (Phase 6 — wird mit jedem Tag interessanter)
             try:
@@ -1314,8 +1315,14 @@ def render_crypto_card(c: dict, key_suffix: str = "main"):
 with tab_stocks:
     if not stock_rows_f:
         st.info("Keine Aktien matchen die Filter.")
-    for s in stock_rows_f:
-        render_stock_card(s, key_suffix="main")
+    for idx, s in enumerate(stock_rows_f):
+        try:
+            render_stock_card(s, key_suffix="main")
+        except Exception as e:
+            st.error(f"Render-Fehler bei #{idx+1} {s.get('ticker')}: {type(e).__name__}: {e}")
+            import traceback
+            with st.expander("Traceback"):
+                st.code(traceback.format_exc())
 
 with tab_crypto:
     # CoinGecko Trending oben anzeigen
@@ -1382,15 +1389,11 @@ if tab_wildcards is not None:
                                 unsafe_allow_html=True)
                     st.caption(f"Score {w['score']:+d}")
 
-                # Sparkline + Expander für Details
+                # Plotly-Candlestick für Wildcard
                 ohlc_w = wildcard_ohlc.get(w["ticker"])
                 if ohlc_w is not None and len(ohlc_w) > 1:
-                    with st.expander("Chart + Details"):
-                        render_tradingview(
-                            tradingview_symbol(w["ticker"], "stock"),
-                            f"tv_wc_{w['ticker'].replace('-', '_')}",
-                            height=400,
-                        )
+                    with st.expander("Chart"):
+                        render_full_chart(ohlc_w, w["ticker"])
 
 with tab_all:
     st.subheader("Alle Assets sortiert nach Empfehlung")
