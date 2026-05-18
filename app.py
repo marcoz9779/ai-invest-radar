@@ -1731,9 +1731,3 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             f"Chat-ID: `{TELEGRAM_CHAT_ID[:6]}…`  ·  "
             f"Auto-Cron: cron-job.org"
         )
-            save_signals({"timestamp": datetime.now().isoformat(),
-                          "patterns": new_signals})
-            if sent > 0:
-                st.success(f"{sent} neue Alert(s) gesendet.")
-            else:
-                st.info("Keine neuen STRONG-Signale.")
