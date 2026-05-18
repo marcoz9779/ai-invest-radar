@@ -15,6 +15,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
+# macOS Python 3.14 SSL-Workaround: _ssl-Modul kann certifi-Bundle nicht lesen.
+# Wir setzen das System-Cert-Bundle als Default für requests/urllib3.
+if "REQUESTS_CA_BUNDLE" not in os.environ:
+    for candidate in ("/etc/ssl/cert.pem",
+                      "/usr/local/etc/openssl/cert.pem",
+                      "/opt/homebrew/etc/openssl/cert.pem"):
+        if os.path.exists(candidate):
+            os.environ["REQUESTS_CA_BUNDLE"] = candidate
+            os.environ.setdefault("SSL_CERT_FILE", candidate)
+            break
+
 import feedparser
 import pandas as pd
 import requests
