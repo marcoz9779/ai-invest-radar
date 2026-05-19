@@ -37,9 +37,9 @@ CREATE TABLE IF NOT EXISTS snapshots (
     news_today INTEGER,
     news_velocity REAL,
     news_bullish_ratio REAL,
-    signals TEXT,
-    UNIQUE(date, ticker)
+    signals TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_ticker_ts ON snapshots(ticker, timestamp);
 CREATE INDEX IF NOT EXISTS idx_ticker_date ON snapshots(ticker, date);
 CREATE INDEX IF NOT EXISTS idx_date ON snapshots(date);
 CREATE INDEX IF NOT EXISTS idx_pattern ON snapshots(pattern_label) WHERE pattern_label IS NOT NULL;
@@ -70,37 +70,65 @@ def init_db() -> None:
 
 
 def save_snapshot_batch(assets: list[dict]) -> int:
-    """UPSERT je (date, ticker). Liefert Anzahl gespeicherter Rows."""
+    """INSERT pro Run einen neuen Row (echte intra-day-History).
+
+    Min-Abstand 10 Min: wenn der letzte Snapshot eines Tickers <10 Min alt ist,
+    überschreiben wir ihn statt einen neuen Row anzulegen (verhindert Spam
+    durch rapid Page-Refreshes).
+    """
     init_db()
     today = datetime.now().strftime("%Y-%m-%d")
-    now = datetime.now().isoformat()
+    now_dt = datetime.now()
+    now = now_dt.isoformat()
     count = 0
     with get_conn() as conn:
         for a in assets:
             buzz = a.get("buzz") or {}
             ns = a.get("news_sentiment") or {}
             try:
+                # Check ob letzter Snapshot <10 Min alt
+                last = conn.execute(
+                    "SELECT id, timestamp FROM snapshots "
+                    "WHERE ticker = ? ORDER BY id DESC LIMIT 1",
+                    (a["ticker"],),
+                ).fetchone()
+                replace_last = False
+                if last:
+                    try:
+                        last_dt = datetime.fromisoformat(last["timestamp"])
+                        if (now_dt - last_dt).total_seconds() < 600:
+                            replace_last = True
+                    except Exception:
+                        pass
+
+                if replace_last:
+                    conn.execute("""
+                        UPDATE snapshots SET
+                            timestamp=?, date=?, asset_type=?, score=?, label=?,
+                            pattern_label=?, price=?, rsi=?, vol_spike=?,
+                            mentions=?, mentions_24h=?, velocity=?,
+                            news_today=?, news_velocity=?, news_bullish_ratio=?,
+                            signals=?
+                        WHERE id=?
+                    """, (
+                        now, today, a.get("type", "stock"),
+                        a.get("score", 0), a.get("label"), a.get("pattern_label"),
+                        a.get("price"), a.get("rsi"), a.get("vol_spike"),
+                        buzz.get("mentions", 0), buzz.get("mentions_24h", 0),
+                        buzz.get("velocity", 0),
+                        a.get("news_today_count", 0), a.get("news_velocity_x", 0),
+                        ns.get("ratio"), a.get("signals", ""),
+                        last["id"],
+                    ))
+                    count += 1
+                    continue
+
                 conn.execute("""
                     INSERT INTO snapshots (
                         timestamp, date, ticker, asset_type, score, label, pattern_label,
                         price, rsi, vol_spike, mentions, mentions_24h, velocity,
                         news_today, news_velocity, news_bullish_ratio, signals
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(date, ticker) DO UPDATE SET
-                        timestamp=excluded.timestamp,
-                        score=excluded.score,
-                        label=excluded.label,
-                        pattern_label=excluded.pattern_label,
-                        price=excluded.price,
-                        rsi=excluded.rsi,
-                        vol_spike=excluded.vol_spike,
-                        mentions=excluded.mentions,
-                        mentions_24h=excluded.mentions_24h,
-                        velocity=excluded.velocity,
-                        news_today=excluded.news_today,
-                        news_velocity=excluded.news_velocity,
-                        news_bullish_ratio=excluded.news_bullish_ratio,
-                        signals=excluded.signals
                 """, (
                     now, today, a["ticker"], a.get("type", "stock"),
                     a.get("score", 0), a.get("label"), a.get("pattern_label"),
@@ -135,14 +163,14 @@ def save_snapshot_batch(assets: list[dict]) -> int:
 
 
 def get_history(ticker: str, days: int = 30) -> list[dict]:
-    """Letzte N Tage Snapshot-History für einen Ticker."""
+    """Letzte N Tage Snapshot-History für einen Ticker (sortiert nach timestamp)."""
     init_db()
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    since = (datetime.now() - timedelta(days=days)).isoformat()
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT * FROM snapshots
-            WHERE ticker = ? AND date >= ?
-            ORDER BY date ASC
+            WHERE ticker = ? AND timestamp >= ?
+            ORDER BY timestamp ASC
         """, (ticker, since)).fetchall()
     return [dict(r) for r in rows]
 

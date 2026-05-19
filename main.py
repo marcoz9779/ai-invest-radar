@@ -91,6 +91,19 @@ GLOSSARY = {
     "Wildcard": "Reddit-Trending Small/Mid-Cap der NICHT im Top-40-Universum ist. Erkannt durch Scan von WSB/r/stocks-hot-posts. Höhere Volatilität, höheres Risiko.",
     "Backtest-SQLite": "Simulation auf echten historischen Multi-Signal-Scores aus der DB. Wird mit jedem Run reicher.",
     "Backtest-Tech": "Simulation nur auf Tech-Indikatoren-Score (RSI/MACD/SMA), berechnet jedem Tag aus den 90d OHLC.",
+    "MCap": "Marktkapitalisierung — Aktienpreis × ausstehende Aktien. T=Trillion ($1'000B), B=Billion ($1'000M). Indikator für Unternehmensgröße. · Quelle: yfinance.Ticker.info",
+    "P/E": "Kurs-Gewinn-Verhältnis (trailing 12 Monate) — wie viele Dollar zahlst du für $1 Gewinn? Niedriger = günstiger bewertet. S&P-500-Durchschnitt ~22. · Quelle: yfinance",
+    "fwd P/E": "Forward P/E — basierend auf erwarteten Gewinnen nächste 12 Monate. Niedriger als P/E = Analysten erwarten Gewinnwachstum. · Quelle: yfinance",
+    "Dividend": "Dividendenrendite — jährliche Dividende ÷ aktueller Kurs. Hoch = mehr Cashflow, aber oft langsameres Kurswachstum. · Quelle: yfinance",
+    "Beta": "β-Wert — Volatilität vs. Markt (S&P 500 = 1.0). >1 = volatiler als Markt, <1 = ruhiger. · Quelle: yfinance",
+    "Rev-Growth": "Umsatzwachstum (Year-over-Year). Positive Werte = wachsendes Geschäft. Korreliert oft mit Kursperformance. · Quelle: yfinance",
+    "EPS-Growth": "Gewinn pro Aktie-Wachstum (YoY). · Quelle: yfinance",
+    "Profit-Margin": "Gewinnmarge — Netto-Gewinn ÷ Umsatz. Höher = effizienteres Geschäft. · Quelle: yfinance",
+    "SMA20": "Simple Moving Average 20 Tage (orange Linie im Chart). Glättet kurzfristige Bewegungen — Trend-Indikator. · Quelle: yfinance OHLC",
+    "SMA50": "Simple Moving Average 50 Tage (violette Linie). Längerfristiger Trend. Preis > SMA20 > SMA50 = Aufwärtstrend. · Quelle: yfinance OHLC",
+    "Score-History": "Score-Verlauf der letzten 30 Tage aus SQLite. Pro Refresh wird ein neuer Snapshot gespeichert — wächst kontinuierlich. Wenn flat: nur 1 Datenpunkt da, kommt mit der Zeit.",
+    "Multi-Source-News": "News werden aus bis zu 7 Quellen parallel geholt und nach Titel-Hash dedupliziert. Quellen: Marketaux (Sentiment), Finnhub, Yahoo, Google News RSS, StockTwits, Hacker News, MarketWatch/CNBC/Reuters RSS.",
+    "Reddit-Buzz": "Reddit-Posts der letzten 7 Tage aus 10 Subreddits, Mention-Velocity + Top-Posts. · Quelle: Reddit public JSON-Endpoint (anonym)",
 }
 
 

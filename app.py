@@ -685,24 +685,37 @@ def render_ticker_card(
                     remove_watchlist_entry(ticker)
                 st.rerun()
 
-        # Fundamentaldaten-Streifen (nur für Aktien)
+        # Fundamentaldaten-Streifen mit Hover-Tooltips (nur für Aktien)
         if fundamentals and asset_type == "stock":
             f = fundamentals
-            fund_items = []
+
+            def _fund(label, value, gkey):
+                tt = GLOSSARY.get(gkey, "").replace('"', "&quot;")
+                return (
+                    f'<span title="{tt}" '
+                    f'style="cursor:help; border-bottom:1px dotted #b0b0b0;">'
+                    f'<b>{label}:</b> {value}</span>'
+                )
+
+            fund_html = []
             if f.get("market_cap"):
-                fund_items.append(f"**MCap:** {fmt_marketcap(f['market_cap'])}")
+                fund_html.append(_fund("MCap", fmt_marketcap(f['market_cap']), "MCap"))
             if f.get("pe"):
-                fund_items.append(f"**P/E:** {f['pe']:.1f}")
+                fund_html.append(_fund("P/E", f"{f['pe']:.1f}", "P/E"))
             if f.get("forward_pe"):
-                fund_items.append(f"**fwd P/E:** {f['forward_pe']:.1f}")
+                fund_html.append(_fund("fwd P/E", f"{f['forward_pe']:.1f}", "fwd P/E"))
             if f.get("dividend_yield"):
-                fund_items.append(f"**Div:** {fmt_pct(f['dividend_yield'])}")
+                fund_html.append(_fund("Div", fmt_pct(f['dividend_yield']), "Dividend"))
             if f.get("beta"):
-                fund_items.append(f"**β:** {f['beta']:.2f}")
+                fund_html.append(_fund("β", f"{f['beta']:.2f}", "Beta"))
             if f.get("revenue_growth"):
-                fund_items.append(f"**Rev-Growth:** {fmt_pct(f['revenue_growth'])}")
-            if fund_items:
-                st.caption(" · ".join(fund_items))
+                fund_html.append(_fund("Rev-Growth", fmt_pct(f['revenue_growth']), "Rev-Growth"))
+            if fund_html:
+                st.markdown(
+                    f'<div style="color:#6a6a6a; font-size:0.85rem; margin-top:0.3rem;">'
+                    + ' · '.join(fund_html) + '</div>',
+                    unsafe_allow_html=True,
+                )
 
         with st.expander("Details: Chart · History · News · Reddit · AI-Sentiment"):
             # Voller Candlestick mit Plotly (nutzt schon-geladene OHLC, kein externes JS)
@@ -719,11 +732,18 @@ def render_ticker_card(
             try:
                 history = get_history(ticker, days=30)
                 if len(history) >= 2:
-                    st.markdown("**Score-History (letzte 30 Tage)**")
-                    hist_df = pd.DataFrame(history)[["date", "score", "mentions", "vol_spike"]]
+                    st.markdown(
+                        f'<div style="font-weight:600; cursor:help; '
+                        f'border-bottom:1px dotted #b0b0b0; display:inline-block;" '
+                        f'title="{GLOSSARY["Score-History"]}">'
+                        f'Score-History (letzte 30 Tage)</div>',
+                        unsafe_allow_html=True,
+                    )
+                    hist_df = pd.DataFrame(history)[["timestamp", "score", "mentions", "vol_spike"]]
+                    hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"])
                     hist_fig = go.Figure()
                     hist_fig.add_trace(go.Scatter(
-                        x=hist_df["date"], y=hist_df["score"],
+                        x=hist_df["timestamp"], y=hist_df["score"],
                         mode="lines+markers", name="Score",
                         line=dict(color="#16a34a", width=2),
                         fill="tozeroy", fillcolor="rgba(22,163,74,0.15)",
@@ -750,12 +770,24 @@ def render_ticker_card(
 
             col_news, col_reddit = st.columns(2)
             with col_news:
-                st.markdown("**News (Multi-Source, dedupliziert)**")
+                st.markdown(
+                    f'<div style="font-weight:600; cursor:help; '
+                    f'border-bottom:1px dotted #b0b0b0; display:inline-block;" '
+                    f'title="{GLOSSARY["Multi-Source-News"]}">'
+                    f'News (Multi-Source, dedupliziert)</div>',
+                    unsafe_allow_html=True,
+                )
                 headlines = render_news_block(
                     ticker, name if name and name != ticker else None, asset_type,
                 )
             with col_reddit:
-                st.markdown("**Reddit-Buzz**")
+                st.markdown(
+                    f'<div style="font-weight:600; cursor:help; '
+                    f'border-bottom:1px dotted #b0b0b0; display:inline-block;" '
+                    f'title="{GLOSSARY["Reddit-Buzz"]}">'
+                    f'Reddit-Buzz</div>',
+                    unsafe_allow_html=True,
+                )
                 posts = render_reddit_block(buzz) if buzz else []
 
             # Claude AI-Sentiment-Fusion
