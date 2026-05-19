@@ -373,6 +373,35 @@ def tradingview_symbol(ticker: str, asset_type: str) -> str:
     return f"BINANCE:{ticker}USDT"
 
 
+def render_full_chart(df: pd.DataFrame, ticker: str):
+    """Voller Candlestick + SMA20/50, nutzt schon-geladene OHLC."""
+    if df is None or df.empty:
+        st.caption("Keine OHLC-Daten verfügbar.")
+        return
+    close = df["Close"].squeeze()
+    sma_20 = SMAIndicator(close, window=20).sma_indicator()
+    sma_50 = SMAIndicator(close, window=50).sma_indicator()
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["Open"].squeeze(),
+        high=df["High"].squeeze(), low=df["Low"].squeeze(),
+        close=close, name=ticker, showlegend=False,
+    ))
+    fig.add_trace(go.Scatter(x=df.index, y=sma_20, name="SMA20",
+                             line=dict(color="#f59e0b", width=1.5)))
+    fig.add_trace(go.Scatter(x=df.index, y=sma_50, name="SMA50",
+                             line=dict(color="#8b5cf6", width=1.5)))
+    fig.update_layout(
+        height=350, xaxis_rangeslider_visible=False,
+        margin=dict(t=10, b=10, l=10, r=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        template="plotly_white",
+    )
+    st.plotly_chart(fig, width="stretch",
+                    key=f"chart_{ticker}_{id(df)}",
+                    config={"displayModeBar": False})
+
+
 def render_tradingview(symbol: str, container_id: str, height: int = 400):
     """Embedded TradingView Advanced Chart Widget."""
     html = f"""
