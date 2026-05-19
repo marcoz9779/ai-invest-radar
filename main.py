@@ -729,7 +729,7 @@ def fetch_crypto_ohlcv_binance(ticker: str, days: int = 90) -> pd.DataFrame | No
     return None
 
 
-def fetch_crypto_ohlc_bulk(tickers: list[str], max_workers: int = 12) -> dict[str, pd.DataFrame]:
+def fetch_crypto_ohlc_bulk(tickers: list[str], max_workers: int = 20) -> dict[str, pd.DataFrame]:
     """Parallel via Binance (gratis, hohe Limits → wir können aggressive parallelisieren).
 
     Erwartet eine Liste von Krypto-TICKERN (z.B. ["BTC", "ETH", ...]), nicht IDs.
@@ -1894,7 +1894,7 @@ def analyze_wildcard_tickers(max_tickers: int = 15) -> tuple[list[dict], dict[st
     return rows, ohlc
 
 
-def fetch_reddit_buzz_bulk(tickers: list[str], subs: str, max_workers: int = 10) -> dict[str, dict]:
+def fetch_reddit_buzz_bulk(tickers: list[str], subs: str, max_workers: int = 16) -> dict[str, dict]:
     """Parallele Reddit-Abfragen für viele Tickers gleichzeitig."""
     out: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:

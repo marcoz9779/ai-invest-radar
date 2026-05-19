@@ -13,6 +13,7 @@ Features:
 - Claude-AI-Sentiment-Fusion (optional, wenn ANTHROPIC_API_KEY gesetzt)
 """
 
+import os
 from datetime import datetime
 
 import pandas as pd
@@ -91,6 +92,33 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# ----------------------------------------------------------------------------
+# Simple-Auth: nur sichtbar bei korrektem ?token= URL-Parameter
+# (App-Token wird aus st.secrets["app_token"] gelesen — lokal aus .env via APP_TOKEN)
+# ----------------------------------------------------------------------------
+def _get_app_token() -> str:
+    """App-Token aus Streamlit-Secrets oder Env-Variable. Leer = kein Auth-Layer."""
+    try:
+        token = st.secrets.get("app_token", "")
+        if token:
+            return token
+    except Exception:
+        pass
+    return os.getenv("APP_TOKEN", "").strip()
+
+
+_app_token = _get_app_token()
+if _app_token:
+    _given = st.query_params.get("token", "")
+    if _given != _app_token:
+        st.title("🔒 AI Invest Radar")
+        st.error(
+            "Zugriff verweigert. Füge `?token=DEIN_TOKEN` an die URL an, z.B. "
+            "`https://your-app.streamlit.app/?token=GEHEIM`."
+        )
+        st.stop()
 
 
 # ----------------------------------------------------------------------------
@@ -256,32 +284,32 @@ def cached_reddit_bulk(tickers_tuple: tuple, subs: str):
     return fetch_reddit_buzz_bulk(list(tickers_tuple), subs)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)  # 1h — F&G ändert sich nur 1x/Tag
 def cached_fear_greed():
     return fetch_fear_greed_crypto()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)  # 1h — Sektor-Performance bei US-Open relevant
 def cached_sectors():
     return fetch_sector_performance()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)  # 1h
 def cached_sector_money_flow():
     return fetch_sector_money_flow()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=21600, show_spinner=False)  # 6h — Wiki views aktualisieren langsam
 def cached_wiki_pageviews(tickers_tuple: tuple):
     return fetch_wikipedia_pageviews_bulk(list(tickers_tuple))
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # 30min — Trending kann sich ändern
 def cached_trending_crypto():
     return fetch_coingecko_trending()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # 30min
 def cached_options_flow(ticker: str):
     return fetch_options_flow(ticker)
 
@@ -1119,12 +1147,16 @@ with st.sidebar:
 # ============================================================================
 # DATEN LADEN
 # ============================================================================
-with st.spinner("Lade Aktien-Daten (Bulk + Earnings)..."):
-    stock_rows, stock_ohlc_p = cached_all_stocks()
-with st.spinner("Lade Top-40 Kryptos (OHLC + Indikatoren)..."):
-    crypto_rows, crypto_ohlc_p = cached_crypto()
+# Aktien + Krypto PARALLEL laden (vorher seriell ~10s, jetzt ~5-6s)
+import concurrent.futures as _cf
+with st.spinner("Lade Aktien + Krypto parallel..."):
+    with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
+        _f_stocks = _ex.submit(cached_all_stocks)
+        _f_crypto = _ex.submit(cached_crypto)
+        stock_rows, stock_ohlc_p = _f_stocks.result()
+        crypto_rows, crypto_ohlc_p = _f_crypto.result()
 
-# Wildcards (Reddit-Trending Small-Caps, optional via Sidebar)
+# Wildcards (Reddit-Trending Small-Caps)
 load_wildcards = st.sidebar.checkbox(
     "🎲 Wildcards (Reddit-Trending)", value=True,
     help="Discovered Small-Caps und Trending-Tickers, die NICHT im Top-40-Universum sind. "
@@ -1156,7 +1188,7 @@ for t, dct in wildcard_ohlc_p.items():
     except Exception:
         pass
 
-# Reddit parallel
+# Reddit parallel für ALLE 80 Tickers
 stock_buzz: dict[str, dict] = {}
 crypto_buzz: dict[str, dict] = {}
 if load_reddit:
@@ -1207,13 +1239,14 @@ def cached_news_sentiment_top(tickers_tuple: tuple, asset_type: str = "stock") -
     return out
 
 
-# Top-Kandidaten ermitteln (nach simplem Label-Score) und news-sentiment nur für die holen
+# News-Sentiment für Top-15 (Reduktion gegenüber Datentiefe minimal: nur ein
+# Sentiment-Aggregat-Cache; die Cards selbst zeigen weiterhin alle News on-demand)
 top_stock_tickers = tuple(s["ticker"] for s in
                           sorted(stock_rows, key=lambda x: -x["score"])[:15])
 top_crypto_tickers = tuple(c["ticker"] for c in
                            sorted(crypto_rows, key=lambda x: -x["score"])[:15])
 
-with st.spinner("Lade News-Sentiment für Top-Picks (Pattern-Detection)..."):
+with st.spinner("Lade News-Sentiment für Pattern-Detection..."):
     stock_news_sent = cached_news_sentiment_top(top_stock_tickers, "stock")
     crypto_news_sent = cached_news_sentiment_top(top_crypto_tickers, "crypto")
 
