@@ -380,7 +380,7 @@ def analyze_stock_df(df: pd.DataFrame, ticker: str, earnings_date: str | None = 
         "pct_from_low": round(ind["pct_from_low"], 1),
         "earnings_date": earnings_date,
         "sector": STOCK_SECTOR.get(ticker, ""),
-        "logo": f"https://logo.clearbit.com/{STOCK_DOMAINS.get(ticker, '')}" if STOCK_DOMAINS.get(ticker) else "",
+        "logo": STOCK_DOMAINS.get(ticker, ""),  # nur Domain — Logo-URL wird im Render mit Fallback gebaut
     }
 
 

@@ -499,9 +499,24 @@ def render_ticker_card(
 
         with col_logo:
             if logo:
+                # logo kann eine voll-URL (Krypto, CoinGecko-Image) oder eine
+                # Aktien-Domain ("apple.com") sein. Im zweiten Fall bauen wir
+                # eine Fallback-Chain: Google-Favicons + DuckDuckGo.
+                if logo.startswith("http"):
+                    src = logo
+                    fallback = ""
+                else:
+                    domain = logo
+                    src = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+                    fallback = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
+                err_attr = (
+                    f"onerror=\"this.onerror=null;this.src='{fallback}';\""
+                    if fallback else ""
+                )
                 st.markdown(
-                    f"<img src='{logo}' style='width:48px;height:48px;"
-                    f"border-radius:8px;object-fit:contain;background:#f5f5f5;'>",
+                    f"<img src='{src}' {err_attr} "
+                    f"style='width:48px;height:48px;border-radius:8px;"
+                    f"object-fit:contain;background:#f5f5f5;padding:4px;'>",
                     unsafe_allow_html=True,
                 )
 
@@ -1217,9 +1232,20 @@ if top5:
         with col:
             with st.container(border=True):
                 if asset.get("logo"):
+                    logo_v = asset["logo"]
+                    if logo_v.startswith("http"):
+                        src = logo_v
+                        err_attr = ""
+                    else:
+                        src = f"https://www.google.com/s2/favicons?domain={logo_v}&sz=128"
+                        err_attr = (
+                            f"onerror=\"this.onerror=null;"
+                            f"this.src='https://icons.duckduckgo.com/ip3/{logo_v}.ico';\""
+                        )
                     st.markdown(
-                        f"<img src='{asset['logo']}' style='width:36px;height:36px;"
-                        f"border-radius:6px;object-fit:contain;background:#f5f5f5;'>",
+                        f"<img src='{src}' {err_attr} "
+                        f"style='width:36px;height:36px;border-radius:6px;"
+                        f"object-fit:contain;background:#f5f5f5;padding:3px;'>",
                         unsafe_allow_html=True,
                     )
                 st.markdown(f"#### {asset['ticker']}")
