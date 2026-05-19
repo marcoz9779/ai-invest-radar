@@ -57,6 +57,7 @@ from main import (
     TELEGRAM_CHAT_ID,
     US_STOCKS,
     analyze_all_stocks,
+    analyze_arbitrary_ticker,
     analyze_crypto,
     analyze_wildcard_tickers,
     backtest_ticker,
@@ -231,6 +232,12 @@ def cached_wildcards(max_tickers: int = 12):
     rows, ohlc = analyze_wildcard_tickers(max_tickers=max_tickers)
     ohlc_pickle = {t: df.to_dict() for t, df in ohlc.items()}
     return rows, ohlc_pickle
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_search(query: str):
+    """Universal-Search für beliebige Tickers (yfinance + Binance Auto-Detect)."""
+    return analyze_arbitrary_ticker(query)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -889,6 +896,72 @@ with col_tg:
 if col_refresh.button("Refresh", width="stretch", type="primary"):
     st.cache_data.clear()
     st.rerun()
+
+
+# ============================================================================
+# ASSET-SEARCH-BAR — jeden Ticker analysieren (yfinance/Binance Auto-Detect)
+# ============================================================================
+search_col1, search_col2 = st.columns([6, 1])
+with search_col1:
+    search_query = st.text_input(
+        "🔎 Asset-Suche",
+        placeholder="Ticker eingeben (z.B. NESN.SW, AMC, DOGE, GME, NOVN.SW)…",
+        key="asset_search",
+        label_visibility="collapsed",
+        help="Funktioniert für alle yfinance-bekannten Aktien/ETFs (mit Suffix für Nicht-US: .SW=Schweiz, .DE=Deutschland, .L=London) und alle Binance-Krypto-Tickers.",
+    )
+with search_col2:
+    search_btn = st.button("Analysieren", width="stretch", key="search_btn")
+
+if search_query and (search_btn or search_query):
+    with st.spinner(f"Analysiere {search_query}..."):
+        result = cached_search(search_query)
+    if result is None:
+        st.warning(f"⚠️ '{search_query}' nicht gefunden. Tipp: Schweizer Aktien brauchen `.SW`-Suffix (NESN.SW, ROG.SW, NOVN.SW), deutsche `.DE`.")
+    else:
+        with st.container(border=True):
+            sc1, sc2, sc3 = st.columns([3, 2, 1])
+            with sc1:
+                st.markdown(f"### `{result['ticker']}` · {result.get('name', '')[:50]}")
+                price = result.get("price", 0)
+                price_str = f"${price:,.4f}" if price < 10 else f"${price:,.2f}"
+                meta = [price_str]
+                if result.get("rsi") is not None:
+                    meta.append(f"RSI {result['rsi']:.1f}")
+                if result.get("sector_yf"):
+                    meta.append(f"Sektor: {result['sector_yf']}")
+                if result.get("market_cap"):
+                    mc = result["market_cap"]
+                    mc_str = (f"${mc/1e12:.2f}T" if mc >= 1e12 else
+                              f"${mc/1e9:.1f}B" if mc >= 1e9 else
+                              f"${mc/1e6:.0f}M")
+                    meta.append(f"MCap {mc_str}")
+                st.caption(" · ".join(meta))
+                st.markdown(f":gray[{result.get('signals', '')}]")
+            with sc2:
+                fund = result.get("fundamentals") or {}
+                fund_lines = []
+                if fund.get("pe"):
+                    fund_lines.append(f"P/E **{fund['pe']:.1f}**")
+                if fund.get("forward_pe"):
+                    fund_lines.append(f"fwd P/E **{fund['forward_pe']:.1f}**")
+                if fund.get("dividend_yield"):
+                    fund_lines.append(f"Div **{fund['dividend_yield']*100:.2f}%**")
+                if fund.get("beta"):
+                    fund_lines.append(f"β **{fund['beta']:.2f}**")
+                if fund_lines:
+                    st.markdown(" · ".join(fund_lines))
+            with sc3:
+                # Generischen Score → Label übersetzen
+                _score = result.get("score", 0)
+                _label = recommendation_label(_score)
+                st.markdown(render_label_badge(_label, big=True), unsafe_allow_html=True)
+                st.caption(f"Score {_score:+d}")
+
+            st.info(
+                "💡 Tipp: Wenn du diesen Ticker oft beobachten willst, füg ihn als "
+                "Wildcard in `US_STOCKS` in `main.py` ein — dann läuft er im normalen Universum mit."
+            )
 
 
 # ============================================================================

@@ -1731,6 +1731,88 @@ def discover_reddit_trending_tickers(subs: str = REDDIT_STOCK_SUBS,
     return out
 
 
+def analyze_arbitrary_ticker(query: str) -> dict | None:
+    """Universal-Analyser für beliebige Tickers (Aktien, Krypto, ETFs).
+
+    Auto-Detect über yfinance.Ticker.info → quoteType:
+    - EQUITY/ETF/INDEX → Aktien-Pfad (yfinance OHLC + Fundamentaldaten)
+    - CRYPTOCURRENCY → Krypto-Pfad (Binance OHLCV + CoinGecko-Search)
+    - Falls beides scheitert: None
+
+    Beispiele:
+    - "NESN.SW" (Nestle Schweiz)
+    - "AMC", "GME" (US-Aktien)
+    - "BTC", "DOGE" (Krypto)
+    - "BTC-USD" (yfinance-Style Krypto)
+    """
+    query = query.strip().upper()
+    if not query:
+        return None
+
+    # Versuch 1: yfinance (Aktien, ETFs, manche Kryptos via -USD-Suffix)
+    candidates = [query, f"{query}-USD"]
+    for symbol in candidates:
+        try:
+            t = yf.Ticker(symbol)
+            info = t.info or {}
+            quote_type = (info.get("quoteType") or "").upper()
+            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            if not price:
+                continue
+
+            df = fetch_stock_data(symbol)
+            if df is None:
+                # OHLC fehlt, aber Info da → minimal-Card
+                return {
+                    "ticker": symbol,
+                    "name": info.get("longName") or info.get("shortName") or symbol,
+                    "price": float(price),
+                    "score": 0,
+                    "rsi": None,
+                    "signals": "OHLC nicht verfügbar (zu wenig History)",
+                    "type": quote_type.lower() if quote_type else "stock",
+                    "logo": "",
+                    "search_match": True,
+                }
+            row = analyze_stock_df(df, symbol, None)
+            row["name"] = info.get("longName") or info.get("shortName") or symbol
+            row["market_cap"] = info.get("marketCap")
+            row["sector_yf"] = info.get("sector", "")
+            row["quote_type"] = quote_type
+            row["type"] = "stock" if quote_type in ("EQUITY", "ETF", "INDEX") else "crypto"
+            row["search_match"] = True
+            # Fundamentaldaten dazuholen
+            try:
+                row["fundamentals"] = fetch_fundamentals(symbol)
+            except Exception:
+                row["fundamentals"] = {}
+            return row
+        except Exception:
+            continue
+
+    # Versuch 2: Binance Krypto (direktes Symbol ohne Suffix)
+    try:
+        crypto_df = fetch_crypto_ohlcv_binance(query)
+        if crypto_df is not None and len(crypto_df) >= 30:
+            ind = _compute_indicators(crypto_df)
+            score, signals = _score_from_indicators(ind, False)
+            return {
+                "ticker": query,
+                "name": query,
+                "price": ind["price"],
+                "rsi": round(ind["rsi"], 1),
+                "score": score,
+                "signals": ", ".join(signals) or "neutral",
+                "type": "crypto",
+                "logo": "",
+                "search_match": True,
+            }
+    except Exception:
+        pass
+
+    return None
+
+
 def validate_trending_ticker(ticker: str) -> dict | None:
     """Prüft via yfinance ob ein Symbol als Aktien-Ticker existiert + holt Basis-Daten."""
     try:
