@@ -30,17 +30,19 @@ URL nach Deploy: `https://<dein-app-name>.streamlit.app/?token=DEIN_APP_TOKEN`
 - Im **Secrets**-Textfeld diesen Block einfügen (Werte aus deiner `.env`):
 
 ```toml
-APP_TOKEN = "DEIN_GENERIERTES_TOKEN_HIER"
-
-MARKETAUX_API_KEY = "MR48wDzPgU9glf2zAw7j6tIBhbA9Xy4autIwmdPs"
-FINNHUB_API_KEY = "d84enmhr01qutij8rj5gd84enmhr01qutij8rj60"
-ANTHROPIC_API_KEY = "sk-ant-api03-..."
+MARKETAUX_API_KEY = "dein-marketaux-key"
+FINNHUB_API_KEY = "dein-finnhub-key"
+ANTHROPIC_API_KEY = "dein-anthropic-key"
 
 REDDIT_USER_AGENT = "ai-invest-radar/0.1 by /u/TrackTraditional6354"
 
-TELEGRAM_BOT_TOKEN = "8973681549:AAHJsUSg5azFHecM-25NKtVmBkiMJCXBH5I"
-TELEGRAM_CHAT_ID = "1658310876"
+TELEGRAM_BOT_TOKEN = "dein-telegram-bot-token"
+TELEGRAM_CHAT_ID = "deine-chat-id"
 ```
+
+> **Optional — URL-Schutz:** Wenn du die App nicht öffentlich willst, füge
+> `APP_TOKEN = "irgendein-geheimwort"` hinzu. Dann ist sie nur via
+> `?token=irgendein-geheimwort` in der URL erreichbar. Ohne die Zeile = öffentlich.
 
 ⚠️ Marketaux/Finnhub/Anthropic/Telegram-Keys ggf vorher regenerieren wenn sie im
 Chat aufgetaucht sind.
