@@ -89,6 +89,9 @@ GLOSSARY = {
     "REDUCE": "Score -2 → Position reduzieren. Bearish-Signale überwiegen leicht.",
     "SELL": "Score ≤ -3 → Exit-Setup. Mehrere Indikatoren bestätigen Bearish.",
     "Wildcard": "Reddit-Trending Small/Mid-Cap der NICHT im Top-40-Universum ist. Erkannt durch Scan von WSB/r/stocks-hot-posts. Höhere Volatilität, höheres Risiko.",
+    "Squeeze-Score": "Short-Squeeze-Potenzial 0-9. Kombiniert: % des Float geshortet (>30% = +4), Days-to-Cover (>7 = +2), Float-Größe (<20M = +2), Reddit-Hype, Penny-Stock-Bonus. Ab 5 = High-Squeeze-Risk. · Quelle: yfinance Short-Interest",
+    "Days-to-Cover": "Short-Ratio — wie viele Handelstage Shortseller bräuchten, um alle Positionen einzudecken. Höher = zäher Squeeze, explosivere Bewegung möglich.",
+    "Short-Float": "Anteil des frei handelbaren Aktienbestands (Float), der leerverkauft ist. >20% = squeeze-anfällig, weil viele Shorts decken müssen wenn der Kurs steigt.",
     "Backtest-SQLite": "Simulation auf echten historischen Multi-Signal-Scores aus der DB. Wird mit jedem Run reicher.",
     "Backtest-Tech": "Simulation nur auf Tech-Indikatoren-Score (RSI/MACD/SMA), berechnet jedem Tag aus den 90d OHLC.",
     "MCap": "Marktkapitalisierung — Aktienpreis × ausstehende Aktien. T=Trillion ($1'000B), B=Billion ($1'000M). Indikator für Unternehmensgröße. · Quelle: yfinance.Ticker.info",
@@ -199,6 +202,7 @@ STABLECOIN_SYMBOLS = {
 REDDIT_STOCK_SUBS = (
     "wallstreetbets+stocks+investing+StockMarket+options"
     "+ValueInvesting+SecurityAnalysis+dividends+pennystocks+Daytrading"
+    "+Shortsqueeze"
 )
 REDDIT_CRYPTO_SUBS = (
     "CryptoCurrency+CryptoMarkets+Bitcoin+ethereum"
@@ -1830,6 +1834,88 @@ def validate_trending_ticker(ticker: str) -> dict | None:
         return None
 
 
+# ============================================================================
+# SHORT-SQUEEZE-DETECTION
+# ============================================================================
+def fetch_short_data(ticker: str) -> dict:
+    """Short-Interest-Kennzahlen via yfinance.
+
+    Liefert short_pct_float (0-1), short_ratio (days-to-cover),
+    shares_short, float_shares.
+    """
+    empty = {"short_pct_float": None, "short_ratio": None,
+             "shares_short": None, "float_shares": None}
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
+        return empty
+    return {
+        "short_pct_float": info.get("shortPercentOfFloat"),
+        "short_ratio": info.get("shortRatio"),
+        "shares_short": info.get("sharesShort"),
+        "float_shares": info.get("floatShares"),
+    }
+
+
+def fetch_short_data_bulk(tickers: list[str], max_workers: int = 8) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_short_data, t): t for t in tickers}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            try:
+                out[t] = fut.result()
+            except Exception:
+                out[t] = {"short_pct_float": None, "short_ratio": None,
+                          "shares_short": None, "float_shares": None}
+    return out
+
+
+def squeeze_score(short_data: dict, reddit_mentions: int = 0,
+                  price: float | None = None) -> tuple[int, list[str]]:
+    """Short-Squeeze-Potenzial. Score 0-9, ab 5 = High-Squeeze-Risk.
+
+    Faktoren: Short-% des Float, Days-to-Cover, Float-Größe, Reddit-Hype,
+    Penny-Stock-Bonus (kleine Preise squeezen heftiger).
+    """
+    score = 0
+    reasons: list[str] = []
+
+    spf = short_data.get("short_pct_float")
+    if spf is not None:
+        spf_pct = spf * 100
+        if spf_pct >= 30:
+            score += 4; reasons.append(f"{spf_pct:.0f}% Float short (extrem)")
+        elif spf_pct >= 20:
+            score += 3; reasons.append(f"{spf_pct:.0f}% Float short (hoch)")
+        elif spf_pct >= 10:
+            score += 1; reasons.append(f"{spf_pct:.0f}% Float short")
+
+    sr = short_data.get("short_ratio")
+    if sr is not None:
+        if sr >= 7:
+            score += 2; reasons.append(f"{sr:.1f} Days-to-Cover (zäh)")
+        elif sr >= 4:
+            score += 1; reasons.append(f"{sr:.1f} Days-to-Cover")
+
+    float_sh = short_data.get("float_shares")
+    if float_sh is not None and float_sh > 0:
+        if float_sh < 20_000_000:
+            score += 2; reasons.append("Mini-Float (<20M)")
+        elif float_sh < 75_000_000:
+            score += 1; reasons.append("Small-Float (<75M)")
+
+    if reddit_mentions >= 8:
+        score += 2; reasons.append(f"Reddit-Hype ({reddit_mentions} Mentions)")
+    elif reddit_mentions >= 4:
+        score += 1; reasons.append(f"Reddit-Buzz ({reddit_mentions} Mentions)")
+
+    if price is not None and 0 < price < 5:
+        score += 1; reasons.append("Penny-Stock-Volatilität")
+
+    return min(score, 9), reasons
+
+
 def analyze_wildcard_tickers(max_tickers: int = 15) -> tuple[list[dict], dict[str, pd.DataFrame]]:
     """Pipeline: Reddit-Trending → Validate → OHLC-Fetch → Score wie Aktien.
 
@@ -1870,6 +1956,8 @@ def analyze_wildcard_tickers(max_tickers: int = 15) -> tuple[list[dict], dict[st
 
     tickers = [c["ticker"] for c in candidates]
     ohlc = fetch_stock_data_bulk(tickers)
+    # Short-Interest-Daten parallel für alle Wildcards
+    short_data = fetch_short_data_bulk(tickers)
 
     rows = []
     for c in candidates:
@@ -1883,14 +1971,29 @@ def analyze_wildcard_tickers(max_tickers: int = 15) -> tuple[list[dict], dict[st
             row["sector_yf"] = c.get("sector", "")
             row["is_wildcard"] = True
             row["hype_metadata"] = c["hype_metadata"]
-            # Hype-Boost: bei vielen Reddit-Mentions +1
             hm = c["hype_metadata"]
+            # Hype-Boost: bei vielen Reddit-Mentions +1
             if hm["mentions"] >= 5 or hm["total_score"] >= 1000:
                 row["score"] += 1
                 row["signals"] += f", WSB-Hype {hm['mentions']}× ({hm['total_score']:,} ups)"
+
+            # Short-Squeeze-Analyse
+            sd = short_data.get(t, {})
+            row["short_data"] = sd
+            sq_score, sq_reasons = squeeze_score(sd, hm["mentions"], row.get("price"))
+            row["squeeze_score"] = sq_score
+            row["squeeze_reasons"] = sq_reasons
+            if sq_score >= 5:
+                row["score"] += 1
+                row["signals"] += f", Squeeze-Risk {sq_score}/9"
+
             rows.append(row)
         except Exception:
             continue
+
+    # Squeeze-Kandidaten nach oben sortieren (höchster Squeeze-Score zuerst)
+    rows.sort(key=lambda r: (r.get("squeeze_score", 0), r.get("score", 0)),
+              reverse=True)
     return rows, ohlc
 
 

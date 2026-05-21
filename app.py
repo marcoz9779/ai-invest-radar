@@ -1539,19 +1539,37 @@ with tab_crypto:
 
 if tab_wildcards is not None:
     with tab_wildcards:
-        st.subheader("🎲 Wildcards — Reddit-Trending Small-Caps")
+        st.subheader("🎲 Wildcards — Reddit-Trending Small-Caps & Squeeze-Radar")
         st.caption(
-            "Diese Tickers wurden in WSB/r/stocks/r/investing diskutiert "
-            "und sind NICHT im Top-40-Universum. Höheres Risiko, potenzieller Edge "
-            "wenn die Crowd früh dran ist. **Nicht für jeden geeignet.**"
+            "Tickers aus WSB/r/stocks/r/Shortsqueeze die NICHT im Top-40-Universum "
+            "sind. Sortiert nach Squeeze-Potenzial. Höheres Risiko, potenzieller Edge."
         )
         st.warning(
-            "⚠️ **Hype-Risk:** Small-Caps haben höhere Vola. Position-Size klein halten. "
-            "Pro Ticker max. 1-2% deines Portfolios."
+            "⚠️ **Hype-Risk:** Small-Caps + Squeeze-Plays haben extreme Vola. "
+            "Position-Size klein halten (max 1-2% pro Ticker). Squeezes können "
+            "genauso schnell zusammenbrechen wie sie hochschiessen."
         )
 
-        wildcard_sorted = sorted(wildcard_rows, key=lambda x: -x["score"])
-        for w in wildcard_sorted:
+        # Squeeze-Übersicht oben
+        squeeze_cands = [w for w in wildcard_rows if w.get("squeeze_score", 0) >= 4]
+        if squeeze_cands:
+            st.markdown("### 🔥 Squeeze-Kandidaten")
+            sq_cols = st.columns(min(5, len(squeeze_cands)))
+            for col, w in zip(sq_cols, squeeze_cands[:5]):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(f"**`{w['ticker']}`**")
+                        sq = w.get("squeeze_score", 0)
+                        color = "red" if sq >= 6 else "orange"
+                        st.markdown(f":{color}[**Squeeze {sq}/9**]")
+                        sd = w.get("short_data", {})
+                        spf = sd.get("short_pct_float")
+                        if spf:
+                            st.caption(f"{spf*100:.0f}% Float short")
+            st.divider()
+
+        # bereits nach squeeze_score sortiert in analyze_wildcard_tickers
+        for w in wildcard_rows:
             hm = w.get("hype_metadata", {})
             mcap = w.get("market_cap")
             mcap_str = (
@@ -1565,9 +1583,17 @@ if tab_wildcards is not None:
                     st.markdown(f"### `{w['ticker']}` · {w.get('name', '')[:50]}")
                     st.caption(
                         f"💰 ${w['price']:,.2f}  ·  📊 MCap {mcap_str}  ·  "
-                        f"Sektor: {w.get('sector_yf') or w.get('sector_yf', '—')}"
+                        f"Sektor: {w.get('sector_yf') or '—'}"
                     )
                     st.markdown(f":gray[RSI {w['rsi']:.1f}  ·  {w['signals']}]")
+                    # Squeeze-Detail-Zeile
+                    sq = w.get("squeeze_score", 0)
+                    if sq >= 4:
+                        reasons = " · ".join(w.get("squeeze_reasons", [])[:4])
+                        sq_color = "red" if sq >= 6 else "orange"
+                        st.markdown(
+                            f":{sq_color}[**🔥 Squeeze-Score {sq}/9** — {reasons}]"
+                        )
                 with col_b:
                     st.metric(
                         "Reddit-Mentions", f"{hm.get('mentions', 0)}×",
@@ -1575,6 +1601,13 @@ if tab_wildcards is not None:
                     )
                     st.caption(f"{hm.get('total_score', 0):,} ups  ·  "
                               f"{len(hm.get('subreddits', []))} Subs")
+                    # Short-Interest-Mini-Anzeige
+                    sd = w.get("short_data", {})
+                    if sd.get("short_pct_float"):
+                        st.caption(
+                            f"📉 Short: {sd['short_pct_float']*100:.0f}% Float · "
+                            f"DtC {sd.get('short_ratio') or '?'}"
+                        )
                     if hm.get("top_title"):
                         st.caption(f"_»{hm['top_title']}«_")
                 with col_c:
