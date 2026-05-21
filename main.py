@@ -188,6 +188,30 @@ STOCK_DOMAINS = {
     "PLTR": "palantir.com", "COIN": "coinbase.com", "INTC": "intel.com",
 }
 
+# Kuratierte Squeeze-Watchlist: high-short-interest / meme / volatile Namen.
+# Werden permanent gescannt (unabhängig von Reddit-Discovery). Tote Tickers
+# filtert der yfinance-Validate-Schritt automatisch raus.
+SQUEEZE_WATCHLIST = [
+    # Meme-Klassiker
+    "GME", "AMC", "BB", "KOSS",
+    # EV / Mobility (chronisch hoch geshortet)
+    "LCID", "RIVN", "NKLA", "CHPT", "QS", "GOEV", "MULN", "FFIE",
+    # Krypto-Miner (extreme Vola)
+    "MARA", "RIOT", "CLSK", "HUT", "BITF", "BTDR",
+    # Clean Energy / Wasserstoff (hoch geshortet)
+    "PLUG", "FCEL", "BE", "BLNK",
+    # Fintech / high-beta
+    "SOFI", "HOOD", "AFRM", "UPST", "OPEN", "CVNA",
+    # Cannabis / Consumer (hoch geshortet)
+    "TLRY", "CGC", "BYND", "WBA",
+    # Space / Travel / Gaming
+    "SPCE", "RKLB", "FUBO", "DKNG",
+    # Quantum Computing (heiss, hoch geshortet, vola)
+    "IONQ", "RGTI", "QBTS",
+    # Nuclear / SMR (neue volatile Sektoren)
+    "OKLO", "SMR", "NNE",
+]
+
 STABLECOIN_SYMBOLS = {
     # Klassische Stablecoins
     "USDT", "USDC", "DAI", "USDE", "TUSD", "FDUSD", "PYUSD", "USDD",
@@ -1997,6 +2021,52 @@ def analyze_wildcard_tickers(max_tickers: int = 15) -> tuple[list[dict], dict[st
     rows.sort(key=lambda r: (r.get("squeeze_score", 0), r.get("score", 0)),
               reverse=True)
     return rows, ohlc
+
+
+def analyze_squeeze_candidates() -> tuple[list[dict], dict[str, pd.DataFrame]]:
+    """Permanenter Scan der SQUEEZE_WATCHLIST — unabhängig von Reddit-Discovery.
+
+    Holt OHLC + Short-Interest + Reddit-Buzz für jede gelistete Aktie,
+    berechnet Tech-Score + Squeeze-Score. Liefert (rows, ohlc) — kompatibel
+    zum Wildcard-Format mit is_squeeze=True.
+    """
+    data = fetch_stock_data_bulk(SQUEEZE_WATCHLIST)
+    if not data:
+        return [], {}
+    tickers = list(data.keys())
+    short_data = fetch_short_data_bulk(tickers)
+    buzz_data = fetch_reddit_buzz_bulk(tickers, REDDIT_STOCK_SUBS)
+
+    rows = []
+    for t in tickers:
+        try:
+            row = analyze_stock_df(data[t], t, None)
+            buzz = buzz_data.get(t, {})
+            mentions = buzz.get("mentions", 0)
+            sd = short_data.get(t, {})
+            row["short_data"] = sd
+            row["buzz"] = buzz
+            row["is_squeeze"] = True
+            row["is_wildcard"] = True  # damit es im Wildcard-Tab landet
+            sq_score, sq_reasons = squeeze_score(sd, mentions, row.get("price"))
+            row["squeeze_score"] = sq_score
+            row["squeeze_reasons"] = sq_reasons
+            # Hype-Metadata-Stub für UI-Kompatibilität
+            row["hype_metadata"] = {
+                "mentions": mentions,
+                "total_score": buzz.get("upvotes", 0),
+                "subreddits": [],
+                "top_title": buzz["posts"][0]["title"] if buzz.get("posts") else "",
+            }
+            if sq_score >= 5:
+                row["score"] += 1
+                row["signals"] += f", Squeeze-Risk {sq_score}/9"
+            rows.append(row)
+        except Exception:
+            continue
+    rows.sort(key=lambda r: (r.get("squeeze_score", 0), r.get("score", 0)),
+              reverse=True)
+    return rows, data
 
 
 def fetch_reddit_buzz_bulk(tickers: list[str], subs: str, max_workers: int = 16) -> dict[str, dict]:

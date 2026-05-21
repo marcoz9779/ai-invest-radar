@@ -60,6 +60,7 @@ from main import (
     analyze_all_stocks,
     analyze_arbitrary_ticker,
     analyze_crypto,
+    analyze_squeeze_candidates,
     analyze_wildcard_tickers,
     backtest_ticker,
     build_morning_digest,
@@ -258,6 +259,14 @@ def cached_crypto():
 def cached_wildcards(max_tickers: int = 12):
     """Reddit-discovered small-caps — TTL 30 Min weil Discovery teurer ist."""
     rows, ohlc = analyze_wildcard_tickers(max_tickers=max_tickers)
+    ohlc_pickle = {t: df.to_dict() for t, df in ohlc.items()}
+    return rows, ohlc_pickle
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_squeeze():
+    """Permanenter Scan der Squeeze-Watchlist (high-short-interest Namen)."""
+    rows, ohlc = analyze_squeeze_candidates()
     ohlc_pickle = {t: df.to_dict() for t, df in ohlc.items()}
     return rows, ohlc_pickle
 
@@ -1156,17 +1165,35 @@ with st.spinner("Lade Aktien + Krypto parallel..."):
         stock_rows, stock_ohlc_p = _f_stocks.result()
         crypto_rows, crypto_ohlc_p = _f_crypto.result()
 
-# Wildcards (Reddit-Trending Small-Caps)
+# Wildcards + Squeeze-Radar
 load_wildcards = st.sidebar.checkbox(
-    "🎲 Wildcards (Reddit-Trending)", value=True,
-    help="Discovered Small-Caps und Trending-Tickers, die NICHT im Top-40-Universum sind. "
-         "Höheres Risiko, aber potenzieller Edge wenn die WSB-Crowd früh dran ist.",
+    "🔥 Squeeze-Radar + Wildcards", value=True,
+    help="Squeeze-Watchlist (40 high-short-interest Namen: EV, Krypto-Miner, "
+         "Cannabis, Quantum, Meme) + Reddit-Trending Small-Caps. "
+         "Hohes Risiko, hohes %-Potenzial.",
 )
+min_squeeze = 0
+if load_wildcards:
+    min_squeeze = st.sidebar.slider(
+        "Min. Squeeze-Score", 0, 9, 0,
+        help="Nur Kandidaten mit Squeeze-Score >= diesem Wert zeigen. "
+             "0=alle, 5+=High-Squeeze-Risk.",
+    )
 wildcard_rows: list[dict] = []
 wildcard_ohlc_p: dict = {}
 if load_wildcards:
-    with st.spinner("Scanne Reddit nach trending Small-Caps..."):
-        wildcard_rows, wildcard_ohlc_p = cached_wildcards(max_tickers=12)
+    with st.spinner("Scanne Reddit-Trending + Squeeze-Watchlist..."):
+        _wc_rows, _wc_ohlc = cached_wildcards(max_tickers=12)
+        _sq_rows, _sq_ohlc = cached_squeeze()
+        # Mergen: Squeeze-Watchlist zuerst, Reddit-Wildcards die noch nicht drin sind dazu
+        _seen = {r["ticker"] for r in _sq_rows}
+        wildcard_rows = _sq_rows + [r for r in _wc_rows if r["ticker"] not in _seen]
+        wildcard_ohlc_p = {**_wc_ohlc, **_sq_ohlc}
+        # Final nach Squeeze-Score sortieren
+        wildcard_rows.sort(
+            key=lambda r: (r.get("squeeze_score", 0), r.get("score", 0)),
+            reverse=True,
+        )
 
 # OHLC zurück zu DataFrames
 stock_ohlc: dict[str, pd.DataFrame] = {}
@@ -1427,7 +1454,9 @@ tabs_config = [
     f"Krypto ({len(crypto_rows_f)})",
 ]
 if wildcard_rows:
-    tabs_config.append(f"🎲 Wildcards ({len(wildcard_rows)})")
+    _wc_filtered = [w for w in wildcard_rows
+                    if w.get("squeeze_score", 0) >= min_squeeze]
+    tabs_config.append(f"🔥 Squeeze-Radar ({len(_wc_filtered)})")
 tabs_config += [
     "Alle Empfehlungen",
     f"★ Watchlist ({wl_count})",
@@ -1568,8 +1597,13 @@ if tab_wildcards is not None:
                             st.caption(f"{spf*100:.0f}% Float short")
             st.divider()
 
-        # bereits nach squeeze_score sortiert in analyze_wildcard_tickers
-        for w in wildcard_rows:
+        # Min-Squeeze-Filter aus Sidebar anwenden
+        _shown = [w for w in wildcard_rows
+                  if w.get("squeeze_score", 0) >= min_squeeze]
+        if min_squeeze > 0:
+            st.caption(f"Filter: nur Squeeze-Score ≥ {min_squeeze} "
+                       f"({len(_shown)} von {len(wildcard_rows)})")
+        for w in _shown:
             hm = w.get("hype_metadata", {})
             mcap = w.get("market_cap")
             mcap_str = (
